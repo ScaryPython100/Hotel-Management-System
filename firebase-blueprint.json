@@ -1,0 +1,15 @@
+{
+  "collections": [
+    {
+      "name": "requests",
+      "description": "Stores guest room service requests",
+      "fields": {
+        "roomId": "string",
+        "items": "array of strings",
+        "customMessage": "string",
+        "status": "string",
+        "createdAt": "timestamp"
+      }
+    }
+  ]
+}

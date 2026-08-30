@@ -1,0 +1,6 @@
+{
+  "name": "Hues Stay Room Service",
+  "description": "Guest room service request portal for Hues Stay Luxury Rooms.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
