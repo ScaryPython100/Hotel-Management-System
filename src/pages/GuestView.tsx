@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { collection, addDoc, query, where, getDocs, updateDoc, onSnapshot } from "firebase/firestore";
+import { collection, addDoc, query, where, getDocs, updateDoc, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { COMMON_ITEMS } from "../types";
 import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
-import { Check, Loader2, ConciergeBell, Info, AlertTriangle } from "lucide-react";
+import { Check, Loader2, Info, AlertTriangle } from "lucide-react";
 
 export default function GuestView() {
   const { hash } = useParams<{ hash: string }>();
@@ -18,6 +18,7 @@ export default function GuestView() {
   const [isSuccess, setIsSuccess] = useState(false);
 
   const [inventory, setInventory] = useState<Record<string, { inUse: number, limit: number }>>({});
+  const [amenitiesStatus, setAmenitiesStatus] = useState<Record<string, 'available' | 'out_of_service'>>({});
 
   useEffect(() => {
     async function validateRoom() {
@@ -25,9 +26,11 @@ export default function GuestView() {
         setIsValidating(false);
         return;
       }
+
       try {
         const q = query(collection(db, "rooms"), where("qrCodeHash", "==", hash));
         const snapshot = await getDocs(q);
+
         if (!snapshot.empty) {
           setRoomNumber(snapshot.docs[0].data().roomNumber);
         }
@@ -37,6 +40,7 @@ export default function GuestView() {
         setIsValidating(false);
       }
     }
+
     validateRoom();
 
     const unsubscribeInventory = onSnapshot(collection(db, "inventory"), (invSnapshot) => {
@@ -50,7 +54,16 @@ export default function GuestView() {
       console.error("Error fetching inventory:", error);
     });
 
-    return () => unsubscribeInventory();
+    const unsubscribeAmenities = onSnapshot(doc(db, "settings", "amenities"), (docSnap) => {
+      if (docSnap.exists()) {
+        setAmenitiesStatus(docSnap.data() as Record<string, 'available' | 'out_of_service'>);
+      }
+    });
+
+    return () => {
+      unsubscribeInventory();
+      unsubscribeAmenities();
+    };
   }, [hash]);
 
   const toggleItem = (item: string) => {
@@ -61,22 +74,32 @@ export default function GuestView() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!roomNumber || !hash) return;
-    
-    if (selectedItems.length === 0 && !customMessage.trim()) {
-      toast.error("Please select an item or enter a custom request.");
+    if (!roomNumber) return;
+
+    if (selectedItems.length === 0 && customMessage.trim() === "") {
+      toast.error("Please select an item or enter a message.");
       return;
     }
 
     setIsSubmitting(true);
-    try {
-      const limitedItemsRequested = selectedItems.filter(item => 
-        COMMON_ITEMS.find(c => c.name === item)?.isLimited
-      );
 
-      // We'll just do simple additions here since it's client side prototyping
-      const requestId = Date.now().toString(); // Use a simple string for now, or just let addDoc handle it
-      
+    try {
+      // Find requested items that are limited
+      const limitedItemsRequested = COMMON_ITEMS
+        .filter(i => i.isLimited && selectedItems.includes(i.name))
+        .map(i => i.name);
+
+      // Verify stock for limited items before proceeding
+      for (const item of limitedItemsRequested) {
+        const inv = inventory[item];
+        if (inv && inv.inUse >= inv.limit) {
+           toast.error(`${item} is currently out of stock. Request cancelled.`);
+           setIsSubmitting(false);
+           return;
+        }
+      }
+
+      // Create Request
       const requestRef = await addDoc(collection(db, "requests"), {
         roomId: roomNumber,
         qrCodeHash: hash,
@@ -102,10 +125,12 @@ export default function GuestView() {
         const invSnap = await getDocs(invQ);
         
         if (invSnap.empty) {
+          const itemDef = COMMON_ITEMS.find(i => i.name === item);
+          const limit = itemDef?.defaultLimit || 1;
           await addDoc(collection(db, "inventory"), {
             name: item,
             inUse: 1,
-            limit: 1 // Default limit
+            limit: limit
           });
         } else {
           // Increment inUse
@@ -207,48 +232,104 @@ export default function GuestView() {
           
           <section>
             <h2 className="text-xl font-serif mb-4 flex items-center">
-              Quick Requests
+              Daily Service Requests
             </h2>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              {COMMON_ITEMS.map((itemObj) => {
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {COMMON_ITEMS.filter(i => i.category === 'Service').map((itemObj) => {
                 const item = itemObj.name;
                 const isSelected = selectedItems.includes(item);
-                const inv = inventory[item];
-                const isOutOfStock = itemObj.isLimited && inv && inv.inUse >= inv.limit;
+                const isOutOfService = amenitiesStatus[item] === 'out_of_service';
+                const isDisabled = isOutOfService;
 
                 return (
                   <button
                     key={item}
                     type="button"
                     onClick={() => {
-                      if (!isOutOfStock) toggleItem(item);
+                      if (!isDisabled) toggleItem(item);
                     }}
-                    disabled={isOutOfStock}
+                    disabled={isDisabled}
                     className={cn(
-                      "bg-white border p-6 flex flex-col justify-between text-left transition-all duration-200 h-28 cursor-pointer rounded-none relative",
+                      "bg-white border p-6 flex flex-col justify-between text-left transition-all duration-200 min-h-[112px] h-auto cursor-pointer rounded-none relative gap-4",
                       isSelected
                         ? "bg-[#F2EFE9] border-[#A68966] text-[#2D2926]"
                         : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]",
-                      isOutOfStock && "opacity-50 cursor-not-allowed hover:bg-white border-[#E5E1DB]"
+                      isDisabled && "opacity-50 cursor-not-allowed hover:bg-white border-[#E5E1DB]"
                     )}
                   >
-                    <div className="flex justify-between items-start w-full">
-                      <span className="font-serif text-lg leading-tight">{item}</span>
+                    <div className="flex justify-between items-start w-full gap-2">
+                      <span className="font-serif text-base md:text-lg leading-tight">{item}</span>
                       <div
                         className={cn(
-                          "w-5 h-5 flex items-center justify-center shrink-0 border rounded-sm",
+                          "w-5 h-5 flex items-center justify-center shrink-0 border rounded-sm mt-0.5",
                           isSelected ? "border-[#A68966] bg-[#A68966]" : "border-[#E5E1DB]",
-                          isOutOfStock && "border-[#E5E1DB] bg-gray-100"
+                          isDisabled && "border-[#E5E1DB] bg-gray-100"
                         )}
                       >
                         {isSelected && <Check className="w-3 h-3 text-white" />}
                       </div>
                     </div>
-                    {isOutOfStock && (
+                    {isOutOfService && (
+                      <span className="text-[10px] text-red-500 uppercase tracking-widest font-bold mt-2">
+                        Unavailable
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-serif mb-4 flex items-center">
+              Inventory Item Requests
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {COMMON_ITEMS.filter(i => i.category === 'Item').map((itemObj) => {
+                const item = itemObj.name;
+                const isSelected = selectedItems.includes(item);
+                const inv = inventory[item];
+                const isOutOfStock = itemObj.isLimited && inv && inv.inUse >= inv.limit;
+                const isOutOfService = amenitiesStatus[item] === 'out_of_service';
+                const isDisabled = isOutOfStock || isOutOfService;
+
+                return (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => {
+                      if (!isDisabled) toggleItem(item);
+                    }}
+                    disabled={isDisabled}
+                    className={cn(
+                      "bg-white border p-6 flex flex-col justify-between text-left transition-all duration-200 min-h-[112px] h-auto cursor-pointer rounded-none relative gap-4",
+                      isSelected
+                        ? "bg-[#F2EFE9] border-[#A68966] text-[#2D2926]"
+                        : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]",
+                      isDisabled && "opacity-50 cursor-not-allowed hover:bg-white border-[#E5E1DB]"
+                    )}
+                  >
+                    <div className="flex justify-between items-start w-full gap-2">
+                      <span className="font-serif text-base md:text-lg leading-tight">{item}</span>
+                      <div
+                        className={cn(
+                          "w-5 h-5 flex items-center justify-center shrink-0 border rounded-sm mt-0.5",
+                          isSelected ? "border-[#A68966] bg-[#A68966]" : "border-[#E5E1DB]",
+                          isDisabled && "border-[#E5E1DB] bg-gray-100"
+                        )}
+                      >
+                        {isSelected && <Check className="w-3 h-3 text-white" />}
+                      </div>
+                    </div>
+                    {isOutOfService ? (
+                      <span className="text-[10px] text-red-500 uppercase tracking-widest font-bold mt-2">
+                        Unavailable
+                      </span>
+                    ) : isOutOfStock ? (
                       <span className="text-[10px] text-red-500 uppercase tracking-widest font-bold mt-2">
                         In Use
                       </span>
-                    )}
+                    ) : null}
                   </button>
                 );
               })}

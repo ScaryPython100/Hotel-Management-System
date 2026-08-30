@@ -18,16 +18,30 @@ export interface RoomRequest {
 export interface AmenityItem {
   name: string;
   isLimited?: boolean;
+  category: 'Service' | 'Item';
+  defaultLimit?: number;
 }
 
 export const COMMON_ITEMS: AmenityItem[] = [
-  { name: "Extra Blanket" },
-  { name: "Ironing Machine", isLimited: true },
-  { name: "Fresh Towels" },
-  { name: "Bottled Water" },
-  { name: "Room Cleaning" },
-  { name: "Toiletries" },
-  { name: "Coffee / Tea" }
+  // Services
+  { name: "Soap Refill", category: "Service" },
+  { name: "Shampoo Refill", category: "Service" },
+  { name: "Hand wash Refill", category: "Service" },
+  { name: "Wifi Password Request", category: "Service" },
+  { name: "Extend the Stay", category: "Service" },
+  { name: "Room Service Required (message before 9am)", category: "Service" },
+  { name: "Water Bottle (Paid)", category: "Service" },
+  { name: "Laundry wash assistance (Paid, self responsibility)", category: "Service" },
+  
+  // Items (Inventory)
+  { name: "Iron Box", isLimited: true, category: "Item", defaultLimit: 5 },
+  { name: "Kettle", isLimited: true, category: "Item", defaultLimit: 5 },
+  { name: "Hair Dryer", isLimited: true, category: "Item", defaultLimit: 2 },
+  { name: "Laptop Table", isLimited: true, category: "Item", defaultLimit: 2 },
+  { name: "Leg Massager (Paid)", isLimited: true, category: "Item", defaultLimit: 1 },
+  { name: "Glasses", isLimited: true, category: "Item", defaultLimit: 10 },
+  { name: "USB 2.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2 },
+  { name: "USB 3.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2 }
 ];
 
 export interface InventoryItem {

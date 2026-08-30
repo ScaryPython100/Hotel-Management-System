@@ -8,6 +8,7 @@ import GuestView from "./pages/GuestView";
 import StaffDashboard from "./pages/StaffDashboard";
 import StaffLayout from "./pages/StaffLayout";
 import StaffRooms from "./pages/StaffRooms";
+import StaffSettings from "./pages/StaffSettings";
 
 export default function App() {
   return (
@@ -18,8 +19,9 @@ export default function App() {
         
         {/* Staff Portal Routes */}
         <Route path="/staff" element={<StaffLayout />}>
-          <Route index element={<StaffDashboard />} />
-          <Route path="rooms" element={<StaffRooms />} />
+           <Route index element={<StaffDashboard />} />
+           <Route path="rooms" element={<StaffRooms />} />
+           <Route path="settings" element={<StaffSettings />} />
         </Route>
         
         {/* Guest View using secure hash */}

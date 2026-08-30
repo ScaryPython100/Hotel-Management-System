@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { LayoutDashboard, QrCode } from "lucide-react";
+import { LayoutDashboard, QrCode, Settings } from "lucide-react";
 
 export default function StaffLayout() {
   const location = useLocation();
@@ -7,6 +7,7 @@ export default function StaffLayout() {
   const navItems = [
     { name: "Live Requests", path: "/staff", icon: <LayoutDashboard className="w-5 h-5 mr-3" /> },
     { name: "Rooms & QR Codes", path: "/staff/rooms", icon: <QrCode className="w-5 h-5 mr-3" /> },
+    { name: "Service Settings", path: "/staff/settings", icon: <Settings className="w-5 h-5 mr-3" /> },
   ];
 
   return (
@@ -14,7 +15,7 @@ export default function StaffLayout() {
       {/* Sidebar */}
       <aside className="w-full md:w-64 bg-[#1A1A1A] text-white flex flex-col shrink-0">
         <div className="p-8 border-b border-white/10">
-          <h1 className="text-2xl font-serif italic text-white mb-2">Hues Stay</h1>
+          <h1 className="text-2xl font-serif italic text-white mb-2">Hues Stay Luxury Rooms</h1>
           <p className="text-[10px] font-medium tracking-[0.2em] uppercase text-[#8C857D]">Staff Portal</p>
         </div>
         <nav className="p-8 flex-1 space-y-4">
