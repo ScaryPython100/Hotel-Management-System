@@ -12,6 +12,10 @@ export default async function handler(req, res) {
   const resendApiKey = process.env.RESEND_API_KEY;
   
   if (resendApiKey) {
+    const toEmails = process.env.RESEND_TO_EMAILS 
+      ? process.env.RESEND_TO_EMAILS.split(',').map(e => e.trim()) 
+      : ["alamuri.kishan@gmail.com", "raghu.alamuri@gmail.com"];
+
     try {
       const resendResponse = await fetch('https://api.resend.com/emails', {
         method: 'POST',
@@ -21,7 +25,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           from: "onboarding@resend.dev",
-          to: ["alamuri.kishan@gmail.com"],
+          to: toEmails,
           subject: `🛎️ New Request from Room ${roomNumber}`,
           text: formattedMessage
         })
