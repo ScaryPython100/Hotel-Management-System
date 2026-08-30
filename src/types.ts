@@ -15,12 +15,33 @@ export interface RoomRequest {
   createdAt: number;
 }
 
-export const COMMON_ITEMS = [
-  "Extra Blanket",
-  "Ironing Machine",
-  "Fresh Towels",
-  "Bottled Water",
-  "Room Cleaning",
-  "Toiletries",
-  "Coffee / Tea"
+export interface AmenityItem {
+  name: string;
+  isLimited?: boolean;
+}
+
+export const COMMON_ITEMS: AmenityItem[] = [
+  { name: "Extra Blanket" },
+  { name: "Ironing Machine", isLimited: true },
+  { name: "Fresh Towels" },
+  { name: "Bottled Water" },
+  { name: "Room Cleaning" },
+  { name: "Toiletries" },
+  { name: "Coffee / Tea" }
 ];
+
+export interface InventoryItem {
+  id?: string;
+  name: string;
+  inUse: number;
+  limit: number;
+}
+
+export interface BorrowedItem {
+  id?: string;
+  roomId: string;
+  itemName: string;
+  status: 'borrowed' | 'returned';
+  createdAt: number;
+  returnedAt?: number;
+}

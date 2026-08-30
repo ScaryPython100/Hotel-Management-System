@@ -9,5 +9,11 @@ service cloud.firestore {
     match /rooms/{roomId} {
       allow read, write: if true;
     }
+    match /inventory/{itemId} {
+      allow read, write: if true;
+    }
+    match /borrowed_items/{borrowId} {
+      allow read, write: if true;
+    }
   }
 }

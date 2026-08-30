@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { collection, addDoc, query, where, getDocs } from "firebase/firestore";
+import { collection, addDoc, query, where, getDocs, updateDoc, onSnapshot } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { COMMON_ITEMS } from "../types";
 import { cn } from "../lib/utils";
@@ -16,6 +16,8 @@ export default function GuestView() {
   const [customMessage, setCustomMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+
+  const [inventory, setInventory] = useState<Record<string, { inUse: number, limit: number }>>({});
 
   useEffect(() => {
     async function validateRoom() {
@@ -36,6 +38,19 @@ export default function GuestView() {
       }
     }
     validateRoom();
+
+    const unsubscribeInventory = onSnapshot(collection(db, "inventory"), (invSnapshot) => {
+      const invMap: Record<string, { inUse: number, limit: number }> = {};
+      invSnapshot.forEach(doc => {
+        const data = doc.data();
+        invMap[data.name] = { inUse: data.inUse, limit: data.limit };
+      });
+      setInventory(invMap);
+    }, (error) => {
+      console.error("Error fetching inventory:", error);
+    });
+
+    return () => unsubscribeInventory();
   }, [hash]);
 
   const toggleItem = (item: string) => {
@@ -55,7 +70,14 @@ export default function GuestView() {
 
     setIsSubmitting(true);
     try {
-      await addDoc(collection(db, "requests"), {
+      const limitedItemsRequested = selectedItems.filter(item => 
+        COMMON_ITEMS.find(c => c.name === item)?.isLimited
+      );
+
+      // We'll just do simple additions here since it's client side prototyping
+      const requestId = Date.now().toString(); // Use a simple string for now, or just let addDoc handle it
+      
+      const requestRef = await addDoc(collection(db, "requests"), {
         roomId: roomNumber,
         qrCodeHash: hash,
         items: selectedItems,
@@ -63,6 +85,37 @@ export default function GuestView() {
         status: "pending",
         createdAt: Date.now(),
       });
+
+      // Update inventory and borrowed_items
+      for (const item of limitedItemsRequested) {
+        // Create borrowed item
+        await addDoc(collection(db, "borrowed_items"), {
+          roomId: roomNumber,
+          itemName: item,
+          status: 'borrowed',
+          createdAt: Date.now(),
+          requestId: requestRef.id
+        });
+        
+        // Find if inventory doc exists
+        const invQ = query(collection(db, "inventory"), where("name", "==", item));
+        const invSnap = await getDocs(invQ);
+        
+        if (invSnap.empty) {
+          await addDoc(collection(db, "inventory"), {
+            name: item,
+            inUse: 1,
+            limit: 1 // Default limit
+          });
+        } else {
+          // Increment inUse
+          const docRef = invSnap.docs[0].ref;
+          const currentInUse = invSnap.docs[0].data().inUse || 0;
+          await updateDoc(docRef, {
+            inUse: currentInUse + 1
+          });
+        }
+      }
       
       // Trigger backend notification (SMS/WhatsApp)
       const notifyResponse = await fetch('/api/notify', {
@@ -157,18 +210,26 @@ export default function GuestView() {
               Quick Requests
             </h2>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              {COMMON_ITEMS.map((item) => {
+              {COMMON_ITEMS.map((itemObj) => {
+                const item = itemObj.name;
                 const isSelected = selectedItems.includes(item);
+                const inv = inventory[item];
+                const isOutOfStock = itemObj.isLimited && inv && inv.inUse >= inv.limit;
+
                 return (
                   <button
                     key={item}
                     type="button"
-                    onClick={() => toggleItem(item)}
+                    onClick={() => {
+                      if (!isOutOfStock) toggleItem(item);
+                    }}
+                    disabled={isOutOfStock}
                     className={cn(
-                      "bg-white border p-6 flex flex-col justify-between text-left transition-all duration-200 h-28 cursor-pointer rounded-none",
+                      "bg-white border p-6 flex flex-col justify-between text-left transition-all duration-200 h-28 cursor-pointer rounded-none relative",
                       isSelected
                         ? "bg-[#F2EFE9] border-[#A68966] text-[#2D2926]"
-                        : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]"
+                        : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]",
+                      isOutOfStock && "opacity-50 cursor-not-allowed hover:bg-white border-[#E5E1DB]"
                     )}
                   >
                     <div className="flex justify-between items-start w-full">
@@ -176,12 +237,18 @@ export default function GuestView() {
                       <div
                         className={cn(
                           "w-5 h-5 flex items-center justify-center shrink-0 border rounded-sm",
-                          isSelected ? "border-[#A68966] bg-[#A68966]" : "border-[#E5E1DB]"
+                          isSelected ? "border-[#A68966] bg-[#A68966]" : "border-[#E5E1DB]",
+                          isOutOfStock && "border-[#E5E1DB] bg-gray-100"
                         )}
                       >
                         {isSelected && <Check className="w-3 h-3 text-white" />}
                       </div>
                     </div>
+                    {isOutOfStock && (
+                      <span className="text-[10px] text-red-500 uppercase tracking-widest font-bold mt-2">
+                        In Use
+                      </span>
+                    )}
                   </button>
                 );
               })}

@@ -10,6 +10,26 @@
         "status": "string",
         "createdAt": "timestamp"
       }
+    },
+    {
+      "name": "inventory",
+      "description": "Tracks availability of limited items like Ironing Machine",
+      "fields": {
+        "name": "string",
+        "inUse": "number",
+        "limit": "number"
+      }
+    },
+    {
+      "name": "borrowed_items",
+      "description": "Tracks which rooms have borrowed which limited items",
+      "fields": {
+        "roomId": "string",
+        "itemName": "string",
+        "status": "string",
+        "createdAt": "timestamp",
+        "returnedAt": "timestamp"
+      }
     }
   ]
 }
