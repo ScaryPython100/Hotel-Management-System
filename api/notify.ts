@@ -14,7 +14,7 @@ export default async function handler(req, res) {
   if (resendApiKey) {
     const toEmails = process.env.RESEND_TO_EMAILS 
       ? process.env.RESEND_TO_EMAILS.split(',').map(e => e.trim()) 
-      : ["alamuri.kishan@gmail.com", "raghu.alamuri@gmail.com"];
+      : ["alamuri.kishan@gmail.com"];
 
     try {
       const resendResponse = await fetch('https://api.resend.com/emails', {
