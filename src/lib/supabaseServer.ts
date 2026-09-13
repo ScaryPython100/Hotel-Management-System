@@ -1,0 +1,542 @@
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+
+let clientInstance: SupabaseClient | null = null;
+
+export const SUPABASE_TABLE_NAME = "guest_requests";
+export const SUPABASE_BORROWED_TABLE = "borrowed_items";
+export const SUPABASE_INVENTORY_TABLE = "inventory";
+
+export const SUPABASE_TABLE_SQL = `-- Run this in Supabase SQL Editor (SQL Editor icon on left menu)
+-- Project: hues-stay-luxury-rooms
+
+-- 1. Guest Requests Table
+CREATE TABLE IF NOT EXISTS public.guest_requests (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    items JSONB DEFAULT '[]'::jsonb,
+    custom_message TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+    created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::bigint,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Index for fast room and status querying
+CREATE INDEX IF NOT EXISTS idx_guest_requests_room ON public.guest_requests(room_id);
+CREATE INDEX IF NOT EXISTS idx_guest_requests_status ON public.guest_requests(status);
+CREATE INDEX IF NOT EXISTS idx_guest_requests_created_at ON public.guest_requests(created_at DESC);
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE public.guest_requests ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow service and public operations" ON public.guest_requests
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
+-- 2. Borrowed Items Table (For tracking appliances given to rooms that need return)
+CREATE TABLE IF NOT EXISTS public.borrowed_items (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    status TEXT DEFAULT 'borrowed' CHECK (status IN ('borrowed', 'returned')),
+    created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::bigint,
+    returned_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_borrowed_items_room ON public.borrowed_items(room_id);
+CREATE INDEX IF NOT EXISTS idx_borrowed_items_status ON public.borrowed_items(status);
+
+ALTER TABLE public.borrowed_items ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow borrowed operations" ON public.borrowed_items
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
+-- 3. Live Inventory Tracker Table (Total items, taken/in use, and available live count)
+CREATE TABLE IF NOT EXISTS public.inventory (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    category TEXT DEFAULT 'Item',
+    total_stock INTEGER NOT NULL DEFAULT 1,
+    taken INTEGER NOT NULL DEFAULT 0,
+    available INTEGER GENERATED ALWAYS AS (GREATEST(0, total_stock - taken)) STORED,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_name ON public.inventory(name);
+
+ALTER TABLE public.inventory ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow inventory operations" ON public.inventory
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
+-- Seed initial inventory items (Kettle, Iron Box, Glasses, etc.)
+INSERT INTO public.inventory (id, name, category, total_stock, taken)
+VALUES 
+    ('inv-iron-box', 'Iron Box', 'Item', 5, 0),
+    ('inv-kettle', 'Kettle', 'Item', 5, 0),
+    ('inv-hair-dryer', 'Hair Dryer', 'Item', 2, 0),
+    ('inv-laptop-table', 'Laptop Table', 'Item', 2, 0),
+    ('inv-leg-massager', 'Leg Massager (Paid)', 'Item', 1, 0),
+    ('inv-glasses', 'Water Glasses', 'Item', 10, 0),
+    ('inv-glasses-alt', 'Glasses', 'Item', 10, 0),
+    ('inv-usb-2', 'USB 2.0 Adaptor + Cable', 'Item', 2, 0),
+    ('inv-usb-3', 'USB 3.0 Adaptor + Cable', 'Item', 2, 0)
+ON CONFLICT (name) DO UPDATE 
+SET total_stock = EXCLUDED.total_stock;
+
+-- Enable Realtime events for live updates (optional)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'guest_requests'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.guest_requests;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'inventory'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.inventory;
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+`;
+
+export function getSupabase(): SupabaseClient | null {
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY)?.trim();
+
+  if (!url || !key) {
+    return null;
+  }
+
+  if (!clientInstance) {
+    try {
+      clientInstance = createClient(url, key, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+        }
+      });
+    } catch (err: any) {
+      console.warn("Could not instantiate Supabase client:", err?.message || "unknown error");
+      return null;
+    }
+  }
+
+  return clientInstance;
+}
+
+export interface RequestRecord {
+  id: string;
+  roomId: string;
+  items: string[];
+  customMessage: string;
+  status: "pending" | "completed";
+  createdAt: number;
+}
+
+/**
+ * Stores or updates a request in Supabase guest_requests table
+ */
+export async function saveRequestToSupabase(req: RequestRecord): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) {
+    return { success: false, error: "Supabase not configured in environment" };
+  }
+
+  try {
+    const payload = {
+      id: req.id,
+      room_id: String(req.roomId),
+      items: Array.isArray(req.items) ? req.items : [],
+      custom_message: req.customMessage || "",
+      status: req.status || "pending",
+      created_at: req.createdAt || Date.now(),
+      updated_at: new Date().toISOString()
+    };
+
+    const { error } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .upsert(payload, { onConflict: "id" });
+
+    if (error) {
+      console.warn("[SUPABASE] Insert/Upsert error:", error.message);
+      return { success: false, error: error.message };
+    }
+
+    console.log(`[SUPABASE] Successfully persisted request ${req.id} for Room ${req.roomId}`);
+    return { success: true };
+  } catch (err: any) {
+    console.warn("[SUPABASE] Exception during save:", err?.message || "error");
+    return { success: false, error: err?.message || "Unknown error" };
+  }
+}
+
+/**
+ * Update request status in Supabase
+ */
+export async function updateRequestStatusInSupabase(id: string, status: "pending" | "completed"): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const { error } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq("id", id);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}
+
+/**
+ * Delete request from Supabase
+ */
+export async function deleteRequestFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const { error } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}
+
+/**
+ * Fetch all requests from Supabase
+ */
+export async function fetchRequestsFromSupabase(): Promise<RequestRecord[] | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.warn("[SUPABASE] Query error:", error.message);
+      return null;
+    }
+
+    if (!data) return [];
+
+    return data.map((row: any) => ({
+      id: row.id,
+      roomId: row.room_id,
+      items: Array.isArray(row.items) ? row.items : [],
+      customMessage: row.custom_message || "",
+      status: row.status === "completed" ? "completed" : "pending",
+      createdAt: Number(row.created_at) || Date.now(),
+    }));
+  } catch (err: any) {
+    console.warn("[SUPABASE] Exception fetching requests:", err?.message);
+    return null;
+  }
+}
+
+/**
+ * Check connection status and whether the table exists
+ */
+export async function getSupabaseStatus(): Promise<{
+  configured: boolean;
+  url?: string;
+  tableExists: boolean;
+  inventoryTableExists?: boolean;
+  borrowedTableExists?: boolean;
+  count: number;
+  inventoryCount?: number;
+  error?: string;
+  sql: string;
+}> {
+  const supabase = getSupabase();
+  const url = process.env.SUPABASE_URL?.trim();
+
+  if (!supabase || !url) {
+    return {
+      configured: false,
+      tableExists: false,
+      count: 0,
+      sql: SUPABASE_TABLE_SQL,
+      error: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing in environment variables."
+    };
+  }
+
+  try {
+    const { count: reqCount, error: reqError } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .select("*", { count: "exact", head: true });
+
+    const { count: invCount, error: invError } = await supabase
+      .from(SUPABASE_INVENTORY_TABLE)
+      .select("*", { count: "exact", head: true });
+
+    const { error: borError } = await supabase
+      .from(SUPABASE_BORROWED_TABLE)
+      .select("*", { count: "exact", head: true });
+
+    return {
+      configured: true,
+      url: url.replace(/(https?:\/\/)([^.]+)(\..*)/, "$1$2$3"),
+      tableExists: !reqError,
+      inventoryTableExists: !invError,
+      borrowedTableExists: !borError,
+      count: reqCount || 0,
+      inventoryCount: invCount || 0,
+      error: reqError ? reqError.message : undefined,
+      sql: SUPABASE_TABLE_SQL
+    };
+  } catch (err: any) {
+    return {
+      configured: true,
+      tableExists: false,
+      count: 0,
+      error: err?.message || "Connection error",
+      sql: SUPABASE_TABLE_SQL
+    };
+  }
+}
+
+export interface BorrowedRecord {
+  id: string;
+  roomId: string;
+  itemName: string;
+  status: "borrowed" | "returned";
+  createdAt: number;
+  returnedAt?: number;
+}
+
+export async function saveBorrowedToSupabase(b: BorrowedRecord): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const payload = {
+      id: b.id,
+      room_id: String(b.roomId),
+      item_name: b.itemName,
+      status: b.status,
+      created_at: b.createdAt || Date.now(),
+      returned_at: b.returnedAt ? new Date(b.returnedAt).toISOString() : null
+    };
+
+    const { error } = await supabase
+      .from(SUPABASE_BORROWED_TABLE)
+      .upsert(payload, { onConflict: "id" });
+
+    if (error) {
+      console.warn("[SUPABASE] Borrowed upsert error:", error.message);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}
+
+export async function markBorrowedReturnedInSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const { error } = await supabase
+      .from(SUPABASE_BORROWED_TABLE)
+      .update({ status: "returned", returned_at: new Date().toISOString() })
+      .eq("id", id);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}
+
+export async function fetchBorrowedFromSupabase(): Promise<BorrowedRecord[] | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from(SUPABASE_BORROWED_TABLE)
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) return null;
+    if (!data) return [];
+
+    return data.map((row: any) => ({
+      id: row.id,
+      roomId: row.room_id,
+      itemName: row.item_name,
+      status: row.status === "returned" ? "returned" : "borrowed",
+      createdAt: Number(row.created_at) || Date.now(),
+      returnedAt: row.returned_at ? new Date(row.returned_at).getTime() : undefined
+    }));
+  } catch {
+    return null;
+  }
+}
+
+export interface SupabaseInventoryRecord {
+  id: string;
+  name: string;
+  category: 'Service' | 'Item';
+  totalStock: number;
+  taken: number;
+  available: number;
+  updatedAt?: string;
+}
+
+/**
+ * Fetch all inventory items from Supabase
+ */
+export async function fetchInventoryFromSupabase(): Promise<SupabaseInventoryRecord[] | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from(SUPABASE_INVENTORY_TABLE)
+      .select("*")
+      .order("name", { ascending: true });
+
+    if (error) {
+      console.warn("[SUPABASE] Inventory fetch error:", error.message);
+      return null;
+    }
+    if (!data) return [];
+
+    return data.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      category: (row.category === "Service" ? "Service" : "Item") as 'Service' | 'Item',
+      totalStock: Number(row.total_stock) || 0,
+      taken: Number(row.taken) || 0,
+      available: Math.max(0, (Number(row.total_stock) || 0) - (Number(row.taken) || 0)),
+      updatedAt: row.updated_at
+    }));
+  } catch (err: any) {
+    console.warn("[SUPABASE] Exception fetching inventory:", err?.message);
+    return null;
+  }
+}
+
+/**
+ * Upsert or add a new inventory item in Supabase
+ */
+export async function upsertInventoryInSupabase(item: {
+  name: string;
+  totalStock: number;
+  taken?: number;
+  category?: 'Service' | 'Item';
+  id?: string;
+}): Promise<{ success: boolean; data?: SupabaseInventoryRecord; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const cleanName = item.name.trim();
+    const id = item.id || `inv-${cleanName.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+    const payload: any = {
+      id,
+      name: cleanName,
+      category: item.category || 'Item',
+      total_stock: Math.max(1, Number(item.totalStock) || 1),
+      updated_at: new Date().toISOString()
+    };
+    if (typeof item.taken === 'number') {
+      payload.taken = Math.max(0, item.taken);
+    }
+
+    const { data, error } = await supabase
+      .from(SUPABASE_INVENTORY_TABLE)
+      .upsert(payload, { onConflict: "name" })
+      .select()
+      .single();
+
+    if (error) {
+      console.warn("[SUPABASE] Upsert inventory error:", error.message);
+      return { success: false, error: error.message };
+    }
+
+    return {
+      success: true,
+      data: data ? {
+        id: data.id,
+        name: data.name,
+        category: data.category || 'Item',
+        totalStock: Number(data.total_stock) || 0,
+        taken: Number(data.taken) || 0,
+        available: Math.max(0, (Number(data.total_stock) || 0) - (Number(data.taken) || 0)),
+        updatedAt: data.updated_at
+      } : undefined
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Error upserting inventory" };
+  }
+}
+
+/**
+ * Atomically adjust taken count in Supabase inventory (e.g. +1 when item delivered, -1 when collected)
+ */
+export async function adjustInventoryTakenInSupabase(itemName: string, delta: number): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const cleanName = itemName.trim();
+    const { data: existing, error: fetchErr } = await supabase
+      .from(SUPABASE_INVENTORY_TABLE)
+      .select("id, taken, total_stock")
+      .ilike("name", cleanName)
+      .single();
+
+    if (fetchErr || !existing) {
+      // If doesn't exist yet, insert with initial stock
+      const initialStock = 5;
+      const initialTaken = Math.max(0, delta);
+      await supabase.from(SUPABASE_INVENTORY_TABLE).insert({
+        id: `inv-${cleanName.toLowerCase().replace(/[^a-z0-9]/g, "-")}`,
+        name: cleanName,
+        category: 'Item',
+        total_stock: initialStock,
+        taken: initialTaken,
+        updated_at: new Date().toISOString()
+      });
+      return { success: true };
+    }
+
+    const newTaken = Math.max(0, (Number(existing.taken) || 0) + delta);
+    const { error: updateErr } = await supabase
+      .from(SUPABASE_INVENTORY_TABLE)
+      .update({ taken: newTaken, updated_at: new Date().toISOString() })
+      .eq("id", existing.id);
+
+    if (updateErr) return { success: false, error: updateErr.message };
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}

@@ -1,82 +1,465 @@
-import React, { useEffect, useState } from "react";
-import { collection, query, orderBy, onSnapshot, doc, updateDoc, deleteDoc, where, getDocs } from "firebase/firestore";
+import React, { useEffect, useState, useMemo } from "react";
+import { collection, query, orderBy, onSnapshot, doc, updateDoc, deleteDoc, where, getDocs, addDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { RoomRequest, BorrowedItem } from "../types";
+import { RoomRequest, BorrowedItem, isReturnableItem } from "../types";
 import { formatDistanceToNow } from "date-fns";
-import { CheckCircle2, Clock, Trash2, BedDouble, AlertCircle, Package } from "lucide-react";
+import { 
+  CheckCircle2, 
+  Clock, 
+  Trash2, 
+  BedDouble, 
+  AlertCircle, 
+  Package, 
+  TableProperties, 
+  LayoutGrid, 
+  Search, 
+  Filter,
+  Check,
+  RotateCcw,
+  History,
+  ArchiveRestore
+} from "lucide-react";
 import toast, { Toaster } from "react-hot-toast";
 
+function getDismissedRequestIds(): string[] {
+  try {
+    const raw = localStorage.getItem("hues_stay_dismissed_requests");
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function StaffDashboard() {
-  const [requests, setRequests] = useState<RoomRequest[]>([]);
-  const [borrowedItems, setBorrowedItems] = useState<BorrowedItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'requests' | 'borrowed'>('requests');
+  const [requests, setRequests] = useState<RoomRequest[]>(() => {
+    try {
+      const saved = localStorage.getItem("hues_stay_requests");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const dismissed = getDismissedRequestIds();
+        return (Array.isArray(parsed) ? parsed : []).filter((r: RoomRequest) => 
+          !dismissed.includes(r.id || "") && 
+          !dismissed.includes(`${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`)
+        );
+      }
+    } catch (e) {}
+    return [];
+  });
+  const [borrowedItems, setBorrowedItems] = useState<BorrowedItem[]>(() => {
+    try {
+      const saved = localStorage.getItem("hues_stay_borrowed");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'cards' | 'table' | 'borrowed'>('table');
+  const [tableSearch, setTableSearch] = useState('');
+  const [tableFilter, setTableFilter] = useState<'all' | 'pending' | 'completed'>('all');
 
   useEffect(() => {
+    // 1. Fetch from server /api/requests
+    const fetchServerRequests = async () => {
+      try {
+        const res = await fetch("/api/requests");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.requests && Array.isArray(data.requests)) {
+            setRequests(prev => {
+              const mergedMap = new Map<string, RoomRequest>();
+              // Existing items
+              prev.forEach(r => {
+                const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
+                mergedMap.set(key, r);
+              });
+              // Server items
+              data.requests.forEach((r: RoomRequest) => {
+                const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
+                if (!mergedMap.has(key)) {
+                  mergedMap.set(key, r);
+                }
+              });
+              const dismissed = getDismissedRequestIds();
+              const combined = Array.from(mergedMap.values())
+                .filter(r => !dismissed.includes(r.id || "") && !dismissed.includes(`${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`))
+                .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+              try {
+                localStorage.setItem("hues_stay_requests", JSON.stringify(combined));
+              } catch (e) {}
+              return combined;
+            });
+          }
+        }
+      } catch (e: any) {
+        console.warn("Server requests fetch error:", e?.message || "error");
+      }
+    };
+
+    fetchServerRequests();
+    
+    // Fetch server borrowed items
+    const fetchServerBorrowed = async () => {
+      try {
+        const res = await fetch("/api/borrowed");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.items && Array.isArray(data.items)) {
+            setBorrowedItems(prev => {
+              const mergedMap = new Map<string, BorrowedItem>();
+              prev.forEach(b => {
+                const key = b.status === "borrowed"
+                  ? `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`
+                  : b.id;
+                mergedMap.set(key, b);
+              });
+              data.items.forEach((b: BorrowedItem) => {
+                const key = b.status === "borrowed"
+                  ? `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`
+                  : b.id;
+                mergedMap.set(key, b);
+              });
+              const combined = Array.from(mergedMap.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+              try {
+                localStorage.setItem("hues_stay_borrowed", JSON.stringify(combined));
+              } catch (e) {}
+              return combined;
+            });
+          }
+        }
+      } catch (e: any) {
+        console.warn("Server borrowed fetch error:", e?.message || "error");
+      }
+    };
+    fetchServerBorrowed();
+
+    const interval = setInterval(() => {
+      fetchServerRequests();
+      fetchServerBorrowed();
+    }, 4000);
+
+    // 2. Cross-tab storage synchronization
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === "hues_stay_requests" && e.newValue) {
+        try {
+          setRequests(JSON.parse(e.newValue));
+        } catch (err) {}
+      }
+      if (e.key === "hues_stay_borrowed" && e.newValue) {
+        try {
+          setBorrowedItems(JSON.parse(e.newValue));
+        } catch (err) {}
+      }
+    };
+    window.addEventListener("storage", handleStorageChange);
+
+    // 3. Firestore live snapshot
     const q = query(collection(db, "requests"), orderBy("createdAt", "desc"));
     
     const unsubscribeReqs = onSnapshot(q, (snapshot) => {
       const reqs: RoomRequest[] = [];
-      snapshot.forEach((doc) => {
-        reqs.push({ id: doc.id, ...doc.data() } as RoomRequest);
+      snapshot.forEach((docSnap) => {
+        reqs.push({ id: docSnap.id, ...docSnap.data() } as RoomRequest);
       });
-      setRequests(reqs);
+      if (reqs.length > 0) {
+        setRequests(prev => {
+          const mergedMap = new Map<string, RoomRequest>();
+          reqs.forEach(r => {
+            const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
+            mergedMap.set(key, r);
+          });
+          prev.forEach(r => {
+            const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
+            if (!mergedMap.has(key)) mergedMap.set(key, r);
+          });
+          const dismissed = getDismissedRequestIds();
+          const combined = Array.from(mergedMap.values())
+            .filter(r => !dismissed.includes(r.id || "") && !dismissed.includes(`${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`))
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+          try {
+            localStorage.setItem("hues_stay_requests", JSON.stringify(combined));
+          } catch (e) {}
+          return combined;
+        });
+      }
       setLoading(false);
     }, (error) => {
-      console.error("Error fetching requests:", error);
-      toast.error("Failed to load requests");
+      console.warn("Real-time requests error, using server/cached requests:", error?.message || "offline");
       setLoading(false);
     });
 
     const bq = query(collection(db, "borrowed_items"), orderBy("createdAt", "desc"));
     const unsubscribeBorrowed = onSnapshot(bq, (snapshot) => {
-      const items: BorrowedItem[] = [];
-      snapshot.forEach((doc) => {
-        items.push({ id: doc.id, ...doc.data() } as BorrowedItem);
+      const itemsMap = new Map<string, BorrowedItem>();
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        const item: BorrowedItem = {
+          id: docSnap.id,
+          roomId: String(d.roomId || ""),
+          itemName: String(d.itemName || ""),
+          status: d.status || "borrowed",
+          createdAt: typeof d.createdAt === "number" ? d.createdAt : Date.now(),
+          requestId: d.requestId ? String(d.requestId) : undefined
+        };
+        const key = item.status === "borrowed"
+          ? `${item.roomId.toLowerCase().trim()}::${item.itemName.toLowerCase().trim()}`
+          : item.id;
+        itemsMap.set(key, item);
       });
-      setBorrowedItems(items);
+      const uniqueItems = Array.from(itemsMap.values());
+      setBorrowedItems(uniqueItems);
+      try {
+        localStorage.setItem("hues_stay_borrowed", JSON.stringify(uniqueItems));
+      } catch (e) {}
     }, (error) => {
-      console.error("Error fetching borrowed items:", error);
+      console.warn("Real-time borrowed items listener:", error?.message || "offline");
     });
 
     return () => {
+      clearInterval(interval);
+      window.removeEventListener("storage", handleStorageChange);
       unsubscribeReqs();
       unsubscribeBorrowed();
     };
   }, []);
 
   const handleMarkCompleted = async (id: string) => {
+    const targetReq = requests.find(r => r.id === id);
+    if (!targetReq) return;
+
+    // 1. Optimistic local update (instant)
+    const updated = requests.map(r => r.id === id ? { ...r, status: "completed" as const } : r);
+    setRequests(updated);
     try {
-      await updateDoc(doc(db, "requests", id), {
-        status: "completed"
-      });
+      localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
+    } catch (e) {}
+
+    // 2. Determine returnable appliances (e.g., Kettle, Iron Box, Hair Dryer, etc.)
+    const returnableItems = (targetReq.items || []).filter(item => isReturnableItem(item));
+
+    if (returnableItems.length > 0) {
+      const newBorrowedRecords: BorrowedItem[] = [];
+
+      for (const item of returnableItems) {
+        // Prevent duplicate active entries for the same room & appliance
+        const alreadyActive = borrowedItems.some(
+          b => b.roomId === targetReq.roomId && 
+               b.itemName.toLowerCase() === item.toLowerCase() && 
+               b.status === 'borrowed'
+        );
+
+        if (!alreadyActive) {
+          const newBorrowed: BorrowedItem = {
+            id: `borrowed-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            roomId: targetReq.roomId,
+            itemName: item,
+            status: 'borrowed',
+            createdAt: Date.now(),
+            requestId: targetReq.id
+          };
+          newBorrowedRecords.push(newBorrowed);
+        }
+      }
+
+      if (newBorrowedRecords.length > 0) {
+        const updatedBorrowed = [...newBorrowedRecords, ...borrowedItems];
+        setBorrowedItems(updatedBorrowed);
+        try {
+          localStorage.setItem("hues_stay_borrowed", JSON.stringify(updatedBorrowed));
+        } catch (e) {}
+
+        // Automatically sync each borrowed record to backend and Supabase
+        for (const b of newBorrowedRecords) {
+          fetch('/api/borrowed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(b)
+          }).catch(e => console.warn("Backend borrowed sync:", e));
+
+          // Also persist to Firestore
+          addDoc(collection(db, "borrowed_items"), {
+            roomId: b.roomId,
+            itemName: b.itemName,
+            status: 'borrowed',
+            createdAt: b.createdAt,
+            requestId: b.requestId || targetReq.id
+          }).catch(e => console.warn("Firestore borrowed sync:", e));
+        }
+
+        toast.success(
+          `Delivered to Room ${targetReq.roomId}! ${returnableItems.join(", ")} is now logged in the Borrowed section (needs collection).`,
+          { duration: 5500 }
+        );
+      } else {
+        toast.success("Request marked as completed");
+      }
+    } else {
       toast.success("Request marked as completed");
-    } catch (error) {
-      console.error("Error updating request:", error);
-      toast.error("Failed to update status");
+    }
+
+    // 3. Sync request completion to backend and Supabase
+    fetch(`/api/requests/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'completed' })
+    }).catch(e => console.warn("Server status update:", e?.message || "offline"));
+
+    try {
+      if (!id.startsWith("local-req-") && !id.startsWith("srv-") && id !== "req-101-initial") {
+        await updateDoc(doc(db, "requests", id), {
+          status: "completed"
+        });
+      }
+    } catch (error: any) {
+      console.warn("Remote sync completed request error:", error?.message || "offline");
+    }
+  };
+
+  const handleToggleStatus = async (id: string, currentStatus: "pending" | "completed") => {
+    const targetReq = requests.find(r => r.id === id);
+    const newStatus: "pending" | "completed" = currentStatus === "completed" ? "pending" : "completed";
+    const updated = requests.map(r => r.id === id ? { ...r, status: newStatus } : r);
+    setRequests(updated);
+    try {
+      localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
+    } catch (e) {}
+
+    // If changing from pending to completed, automatically transfer appliances to Borrowed
+    if (newStatus === "completed" && targetReq) {
+      const returnableItems = (targetReq.items || []).filter(item => isReturnableItem(item));
+      const newBorrowedRecords: BorrowedItem[] = [];
+
+      for (const item of returnableItems) {
+        const alreadyActive = borrowedItems.some(
+          b => b.roomId === targetReq.roomId && 
+               b.itemName.toLowerCase() === item.toLowerCase() && 
+               b.status === 'borrowed'
+        );
+        if (!alreadyActive) {
+          const newBorrowed: BorrowedItem = {
+            id: `borrowed-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            roomId: targetReq.roomId,
+            itemName: item,
+            status: 'borrowed',
+            createdAt: Date.now(),
+            requestId: targetReq.id
+          };
+          newBorrowedRecords.push(newBorrowed);
+        }
+      }
+
+      if (newBorrowedRecords.length > 0) {
+        const updatedBorrowed = [...newBorrowedRecords, ...borrowedItems];
+        setBorrowedItems(updatedBorrowed);
+        try {
+          localStorage.setItem("hues_stay_borrowed", JSON.stringify(updatedBorrowed));
+        } catch (e) {}
+
+        for (const b of newBorrowedRecords) {
+          fetch('/api/borrowed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(b)
+          }).catch(e => console.warn("Backend borrowed sync:", e));
+
+          addDoc(collection(db, "borrowed_items"), {
+            roomId: b.roomId,
+            itemName: b.itemName,
+            status: 'borrowed',
+            createdAt: b.createdAt,
+            requestId: b.requestId || targetReq.id
+          }).catch(e => console.warn("Firestore borrowed sync:", e));
+        }
+
+        toast.success(
+          `Delivered to Room ${targetReq.roomId}! ${returnableItems.join(", ")} moved to Borrowed.`,
+          { duration: 4000 }
+        );
+      } else {
+        toast.success("Request marked as completed");
+      }
+    } else {
+      toast.success(`Request marked as ${newStatus}`);
+    }
+
+    // Sync with server API & Supabase
+    fetch(`/api/requests/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus })
+    }).catch(e => console.warn("Server status toggle:", e?.message || "offline"));
+
+    try {
+      if (!id.startsWith("local-req-") && !id.startsWith("srv-") && id !== "req-101-initial") {
+        await updateDoc(doc(db, "requests", id), {
+          status: newStatus
+        });
+      }
+    } catch (error: any) {
+      console.warn("Remote sync status error:", error?.message || "offline");
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm("Are you sure you want to delete this request?")) return;
+    const reqToDelete = requests.find(r => r.id === id);
+    const signature = reqToDelete ? `${reqToDelete.roomId}-${(reqToDelete.items || []).join(',')}-${reqToDelete.customMessage || ''}` : '';
+
+    if (!window.confirm("Remove this request from the dashboard view?\n\n(Note: The request record will remain permanently preserved in your Supabase database as required.)")) return;
+
+    // Save to dismissed IDs list so it does not reappear on dashboard refresh
     try {
-      await deleteDoc(doc(db, "requests", id));
-      toast.success("Request deleted");
-    } catch (error) {
-      console.error("Error deleting request:", error);
-      toast.error("Failed to delete request");
+      const dismissed = getDismissedRequestIds();
+      if (id && !dismissed.includes(id)) dismissed.push(id);
+      if (signature && !dismissed.includes(signature)) dismissed.push(signature);
+      localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(dismissed));
+    } catch (e) {}
+
+    // Optimistic local update (instant)
+    const updated = requests.filter(r => r.id !== id);
+    setRequests(updated);
+    try {
+      localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
+    } catch (e) {}
+    toast.success("Request removed from dashboard (preserved in Supabase)");
+
+    // Sync with server API (removes from active queue, strictly preserves in Supabase)
+    fetch(`/api/requests/${id}`, { method: 'DELETE' }).catch(e => console.warn("Server delete:", e?.message || "offline"));
+
+    try {
+      if (!id.startsWith("local-req-") && !id.startsWith("srv-") && id !== "req-101-initial") {
+        await deleteDoc(doc(db, "requests", id));
+      }
+    } catch (error: any) {
+      console.warn("Remote delete request error:", error?.message || "offline");
     }
   };
 
   const handleMarkReturned = async (borrowedId: string, itemName: string) => {
-    try {
-      // 1. Mark item as returned
-      await updateDoc(doc(db, "borrowed_items", borrowedId), {
-        status: "returned",
-        returnedAt: Date.now()
-      });
+    const itemObj = borrowedItems.find(b => b.id === borrowedId);
+    const room = itemObj ? itemObj.roomId : "";
 
-      // 2. Decrement inventory inUse
+    // 1. Optimistic local update (instant)
+    const updated = borrowedItems.map(b => b.id === borrowedId ? { ...b, status: "returned" as const, returnedAt: Date.now() } : b);
+    setBorrowedItems(updated);
+    try {
+      localStorage.setItem("hues_stay_borrowed", JSON.stringify(updated));
+    } catch (e) {}
+    toast.success(`Collected ${itemName} back from Room ${room || 'room'}! Returned to inventory.`);
+
+    // 2. Automatically sync to backend and Supabase
+    fetch(`/api/borrowed/${borrowedId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'returned', itemName })
+    }).catch(e => console.warn("Backend return sync:", e));
+
+    try {
+      if (!borrowedId.startsWith("borrowed-")) {
+        await updateDoc(doc(db, "borrowed_items", borrowedId), {
+          status: "returned",
+          returnedAt: Date.now()
+        });
+      }
+
       const invQ = query(collection(db, "inventory"), where("name", "==", itemName));
       const invSnap = await getDocs(invQ);
       if (!invSnap.empty) {
@@ -86,41 +469,116 @@ export default function StaffDashboard() {
           inUse: Math.max(0, currentInUse - 1)
         });
       }
-
-      toast.success(`${itemName} marked as returned`);
-    } catch (error) {
-      console.error("Error returning item:", error);
-      toast.error("Failed to mark as returned");
+    } catch (error: any) {
+      console.warn("Remote mark returned sync error:", error?.message || "offline");
     }
+  };
+
+  const handleDeleteBorrowed = (id: string, itemName: string) => {
+    setBorrowedItems(prev => prev.filter(b => b.id !== id));
+    try {
+      const saved = JSON.parse(localStorage.getItem("hues_stay_borrowed") || "[]");
+      const next = saved.filter((b: any) => b.id !== id);
+      localStorage.setItem("hues_stay_borrowed", JSON.stringify(next));
+    } catch (e) {}
+    toast.success(`Removed ${itemName} from dashboard view (records preserved in database).`);
   };
 
   const pendingRequests = requests.filter(r => r.status === "pending");
   const completedRequests = requests.filter(r => r.status === "completed");
-  const activeBorrowed = borrowedItems.filter(b => b.status === "borrowed");
+
+  const activeBorrowed = useMemo(() => {
+    const map = new Map<string, BorrowedItem>();
+    borrowedItems
+      .filter(b => b.status === "borrowed")
+      .forEach(b => {
+        const key = `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`;
+        if (!map.has(key)) {
+          map.set(key, b);
+        }
+      });
+    return Array.from(map.values());
+  }, [borrowedItems]);
+
+  const pendingByRoom = pendingRequests.reduce((acc, req) => {
+    if (!acc[req.roomId]) acc[req.roomId] = [];
+    acc[req.roomId].push(req);
+    return acc;
+  }, {} as Record<string, RoomRequest[]>);
+
+  const completedByRoom = completedRequests.reduce((acc, req) => {
+    if (!acc[req.roomId]) acc[req.roomId] = [];
+    acc[req.roomId].push(req);
+    return acc;
+  }, {} as Record<string, RoomRequest[]>);
+
+  // Filtered requests for the table view
+  const filteredTableRequests = useMemo(() => {
+    return requests.filter(req => {
+      // Status filter
+      if (tableFilter === 'pending' && req.status !== 'pending') return false;
+      if (tableFilter === 'completed' && req.status !== 'completed') return false;
+
+      // Search filter
+      if (tableSearch.trim()) {
+        const query = tableSearch.toLowerCase().trim();
+        const roomMatch = (req.roomId || "").toLowerCase().includes(query);
+        const itemsMatch = Array.isArray(req.items) 
+          ? req.items.some((i: any) => String(i).toLowerCase().includes(query))
+          : String(req.items || "").toLowerCase().includes(query);
+        const messageMatch = (req.customMessage || "").toLowerCase().includes(query);
+        return roomMatch || itemsMatch || messageMatch;
+      }
+
+      return true;
+    });
+  }, [requests, tableFilter, tableSearch]);
 
   return (
     <>
       <Toaster position="top-right" />
       <div className="p-8 md:p-12">
-        <div className="max-w-6xl mx-auto">
-          <header className="mb-10 flex flex-col md:flex-row md:items-end justify-between gap-6">
+        <div className="max-w-7xl mx-auto">
+          <header className="mb-8 flex flex-col lg:flex-row lg:items-end justify-between gap-6">
             <div>
-              <h2 className="text-4xl font-serif italic text-[#2D2926]">Live Dashboard</h2>
-              <p className="text-sm text-[#8C857D] mt-2 italic">Manage incoming room service requests and inventory in real-time.</p>
+              <div className="flex items-center gap-3 mb-1">
+                <h2 className="text-4xl font-serif italic text-[#2D2926]">Staff Requests Dashboard</h2>
+              </div>
+              <p className="text-sm text-[#8C857D] italic">
+                Real-time room requests, structured data records, and borrowed inventory.
+              </p>
             </div>
             
-            <div className="flex border border-[#E5E1DB] bg-white p-1">
+            {/* View & Tab Switcher */}
+            <div className="flex border border-[#E5E1DB] bg-white p-1 rounded-none shadow-sm">
               <button 
-                onClick={() => setActiveTab('requests')}
-                className={`px-6 py-2.5 text-xs font-medium tracking-widest uppercase transition-colors ${activeTab === 'requests' ? 'bg-[#A68966] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'}`}
+                onClick={() => setActiveTab('table')}
+                className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
+                  activeTab === 'table' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                }`}
+                title="Structured Columns & Rows Table"
               >
-                Requests {pendingRequests.length > 0 && `(${pendingRequests.length})`}
+                <TableProperties className="w-3.5 h-3.5" />
+                Table View {requests.length > 0 && `(${requests.length})`}
+              </button>
+              <button 
+                onClick={() => setActiveTab('cards')}
+                className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
+                  activeTab === 'cards' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                }`}
+                title="Room Grouped Cards"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                Cards {pendingRequests.length > 0 && `(${pendingRequests.length})`}
               </button>
               <button 
                 onClick={() => setActiveTab('borrowed')}
-                className={`px-6 py-2.5 text-xs font-medium tracking-widest uppercase transition-colors ${activeTab === 'borrowed' ? 'bg-[#A68966] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'}`}
+                className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
+                  activeTab === 'borrowed' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                }`}
               >
-                Borrowed Items {activeBorrowed.length > 0 && `(${activeBorrowed.length})`}
+                <Package className="w-3.5 h-3.5" />
+                Borrowed {activeBorrowed.length > 0 && `(${activeBorrowed.length})`}
               </button>
             </div>
           </header>
@@ -130,8 +588,211 @@ export default function StaffDashboard() {
               <div className="animate-spin h-12 w-12 border-t-2 border-b-2 border-[#A68966]"></div>
             </div>
           ) : (
-            <div className="space-y-12">
-              {activeTab === 'requests' && (
+            <div className="space-y-8">
+              {/* TABLE VIEW (COLUMNS AND ROWS) */}
+              {activeTab === 'table' && (
+                <div className="bg-white border border-[#E5E1DB] shadow-sm">
+                  {/* Table Toolbar */}
+                  <div className="p-4 border-b border-[#E5E1DB] flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#FAF8F5]">
+                    <div className="flex items-center gap-3 flex-1 max-w-md">
+                      <div className="relative w-full">
+                        <Search className="w-4 h-4 text-[#8C857D] absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          placeholder="Search room, amenity, message..."
+                          value={tableSearch}
+                          onChange={(e) => setTableSearch(e.target.value)}
+                          className="w-full pl-9 pr-4 py-2 border border-[#E5E1DB] bg-white text-xs text-[#2D2926] focus:outline-none focus:border-[#A68966]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] uppercase tracking-widest text-[#8C857D] font-bold flex items-center mr-1">
+                        <Filter className="w-3 h-3 mr-1" />
+                        Status:
+                      </span>
+                      <div className="inline-flex border border-[#E5E1DB] bg-white p-0.5 text-xs">
+                        <button
+                          onClick={() => setTableFilter('all')}
+                          className={`px-3 py-1 font-medium text-[11px] uppercase tracking-wider transition-colors ${
+                            tableFilter === 'all' ? 'bg-[#A68966] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                          }`}
+                        >
+                          All ({requests.length})
+                        </button>
+                        <button
+                          onClick={() => setTableFilter('pending')}
+                          className={`px-3 py-1 font-medium text-[11px] uppercase tracking-wider transition-colors ${
+                            tableFilter === 'pending' ? 'bg-[#A68966] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                          }`}
+                        >
+                          Pending ({pendingRequests.length})
+                        </button>
+                        <button
+                          onClick={() => setTableFilter('completed')}
+                          className={`px-3 py-1 font-medium text-[11px] uppercase tracking-wider transition-colors ${
+                            tableFilter === 'completed' ? 'bg-[#A68966] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                          }`}
+                        >
+                          Done ({completedRequests.length})
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Table Content */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-[#E5E1DB] bg-[#F4F1EC] text-[#2D2926] uppercase text-[10px] tracking-wider font-semibold">
+                          <th className="py-3 px-4">Room Number</th>
+                          <th className="py-3 px-4">Requests Asked</th>
+                          <th className="py-3 px-4">Message</th>
+                          <th className="py-3 px-4">Date</th>
+                          <th className="py-3 px-4">Day</th>
+                          <th className="py-3 px-4">Time</th>
+                          <th className="py-3 px-4">Status</th>
+                          <th className="py-3 px-4 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#E5E1DB]">
+                        {filteredTableRequests.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="py-12 text-center text-[#8C857D] italic bg-white">
+                              No requests match your current filters.
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredTableRequests.map((req) => {
+                            const dateObj = req.createdAt ? new Date(req.createdAt) : new Date();
+                            const isPending = req.status === "pending";
+
+                            return (
+                              <tr 
+                                key={req.id} 
+                                className={`transition-colors hover:bg-[#FAF8F5] ${
+                                  isPending ? "bg-white" : "bg-[#FAF8F5]/40 opacity-75"
+                                }`}
+                              >
+                                {/* Room Number */}
+                                <td className="py-3 px-4 font-mono font-bold text-[#2D2926]">
+                                  <span className="inline-flex items-center px-2 py-1 bg-[#F4F1EC] border border-[#E5E1DB] rounded-none">
+                                    <BedDouble className="w-3.5 h-3.5 mr-1.5 text-[#A68966]" />
+                                    {req.roomId || "N/A"}
+                                  </span>
+                                </td>
+
+                                {/* Requests Asked */}
+                                <td className="py-3 px-4 text-[#2D2926]">
+                                  {req.items && req.items.length > 0 ? (
+                                    <div className="flex flex-wrap gap-1">
+                                      {req.items.map((item, idx) => (
+                                        <span 
+                                          key={idx} 
+                                          className="px-2 py-0.5 bg-[#F9F7F4] border border-[#E5E1DB] text-[10px] font-medium uppercase tracking-wider text-[#2D2926]"
+                                        >
+                                          {item}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <span className="text-[#8C857D] italic">—</span>
+                                  )}
+                                </td>
+
+                                {/* Message */}
+                                <td className="py-3 px-4 text-[#2D2926] max-w-xs">
+                                  {req.customMessage ? (
+                                    <span className="italic text-[#555] block truncate" title={req.customMessage}>
+                                      "{req.customMessage}"
+                                    </span>
+                                  ) : (
+                                    <span className="text-[#8C857D] italic">—</span>
+                                  )}
+                                </td>
+
+                                {/* Date */}
+                                <td className="py-3 px-4 text-[#555] whitespace-nowrap font-mono">
+                                  {dateObj.toLocaleDateString()}
+                                </td>
+
+                                {/* Day */}
+                                <td className="py-3 px-4 text-[#555] whitespace-nowrap">
+                                  {dateObj.toLocaleDateString(undefined, { weekday: 'long' })}
+                                </td>
+
+                                {/* Time */}
+                                <td className="py-3 px-4 text-[#555] whitespace-nowrap font-mono">
+                                  {dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </td>
+
+                                {/* Status */}
+                                <td className="py-3 px-4 whitespace-nowrap">
+                                  <button
+                                    onClick={() => handleToggleStatus(req.id!, req.status || "pending")}
+                                    className={`inline-flex items-center px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors border ${
+                                      isPending
+                                        ? "bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100"
+                                        : "bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100"
+                                    }`}
+                                    title="Click to toggle status"
+                                  >
+                                    {isPending ? (
+                                      <>
+                                        <Clock className="w-3 h-3 mr-1 text-amber-600" />
+                                        Pending
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Check className="w-3 h-3 mr-1 text-emerald-600" />
+                                        Completed
+                                      </>
+                                    )}
+                                  </button>
+                                </td>
+
+                                {/* Actions */}
+                                <td className="py-3 px-4 text-right whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <button
+                                      onClick={() => handleToggleStatus(req.id!, req.status || "pending")}
+                                      className="p-1 text-[#8C857D] hover:text-[#2D2926] border border-[#E5E1DB] bg-white transition-colors"
+                                      title={isPending ? "Mark as Done" : "Mark as Pending"}
+                                    >
+                                      {isPending ? <Check className="w-3.5 h-3.5" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                                    </button>
+                                    <button
+                                      onClick={() => handleDelete(req.id!)}
+                                      className="p-1 text-red-500 hover:text-red-700 border border-red-200 hover:bg-red-50 transition-colors"
+                                      title="Delete Record"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Table Footer Summary */}
+                  <div className="p-3 border-t border-[#E5E1DB] bg-[#FAF8F5] flex items-center justify-between text-[11px] text-[#8C857D]">
+                    <span>
+                      Showing {filteredTableRequests.length} of {requests.length} total request records
+                    </span>
+                    <span className="font-mono">
+                      {pendingRequests.length} pending · {completedRequests.length} completed
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* CARD VIEW */}
+              {activeTab === 'cards' && (
                 <>
                   {/* Pending Section */}
                   <section>
@@ -140,19 +801,21 @@ export default function StaffDashboard() {
                       Needs Attention ({pendingRequests.length})
                     </h3>
                     
-                    {pendingRequests.length === 0 ? (
+                    {Object.keys(pendingByRoom).length === 0 ? (
                       <div className="bg-white border border-dashed border-[#E5E1DB] p-12 text-center">
                         <CheckCircle2 className="w-10 h-10 text-[#E5E1DB] mx-auto mb-4" />
                         <p className="text-sm italic text-[#8C857D]">No pending requests right now. Great job!</p>
                       </div>
                     ) : (
                       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-                        {pendingRequests.map(req => (
-                          <RequestCard 
-                            key={req.id} 
-                            request={req} 
-                            onComplete={() => handleMarkCompleted(req.id!)}
-                            onDelete={() => handleDelete(req.id!)}
+                        {Object.entries(pendingByRoom).map(([roomId, roomReqs]) => (
+                          <RoomGroupCard 
+                            key={`pending-${roomId}`}
+                            roomId={roomId}
+                            requests={roomReqs}
+                            onComplete={handleMarkCompleted}
+                            onDelete={handleDelete}
+                            isPending={true}
                           />
                         ))}
                       </div>
@@ -160,18 +823,21 @@ export default function StaffDashboard() {
                   </section>
 
                   {/* Completed Section */}
-                  {completedRequests.length > 0 && (
+                  {Object.keys(completedByRoom).length > 0 && (
                     <section>
                       <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#8C857D] mb-6 flex items-center">
                         <CheckCircle2 className="w-4 h-4 mr-2" />
                         Recently Completed
                       </h3>
                       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 opacity-70">
-                        {completedRequests.slice(0, 9).map(req => (
-                          <RequestCard 
-                            key={req.id} 
-                            request={req} 
-                            onDelete={() => handleDelete(req.id!)}
+                        {Object.entries(completedByRoom).slice(0, 9).map(([roomId, roomReqs]) => (
+                          <RoomGroupCard 
+                            key={`completed-${roomId}`}
+                            roomId={roomId}
+                            requests={roomReqs}
+                            onComplete={handleMarkCompleted}
+                            onDelete={handleDelete}
+                            isPending={false}
                           />
                         ))}
                       </div>
@@ -180,47 +846,69 @@ export default function StaffDashboard() {
                 </>
               )}
 
+              {/* BORROWED ITEMS VIEW */}
               {activeTab === 'borrowed' && (
                 <section>
-                  <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#8C857D] mb-6 flex items-center">
-                    <Package className="w-4 h-4 mr-2 text-[#A68966]" />
-                    Items Currently In Rooms ({activeBorrowed.length})
-                  </h3>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-[#E5E1DB] gap-2">
+                    <div>
+                      <h3 className="text-sm uppercase tracking-[0.2em] font-bold text-[#2D2926] flex items-center">
+                        <Package className="w-4 h-4 mr-2 text-[#A68966]" />
+                        Appliances & Items In Rooms ({activeBorrowed.length})
+                      </h3>
+                      <p className="text-xs text-[#8C857D] mt-1">
+                        Delivered appliances currently inside guest rooms. Mark collected once housekeeping retrieves them.
+                      </p>
+                    </div>
+                  </div>
                   
                   {activeBorrowed.length === 0 ? (
                     <div className="bg-white border border-dashed border-[#E5E1DB] p-12 text-center">
-                      <CheckCircle2 className="w-10 h-10 text-[#E5E1DB] mx-auto mb-4" />
-                      <p className="text-sm italic text-[#8C857D]">No limited items are currently borrowed.</p>
+                      <CheckCircle2 className="w-10 h-10 text-[#A68966] mx-auto mb-4 opacity-50" />
+                      <h4 className="text-sm font-semibold text-[#2D2926] mb-1">No items currently in guest rooms</h4>
+                      <p className="text-xs text-[#8C857D] max-w-md mx-auto">
+                        When you mark a request done for a Kettle, Iron Box, or other appliance, it is automatically logged here so you know which room has it and needs to be collected back.
+                      </p>
                     </div>
                   ) : (
                     <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
                       {activeBorrowed.map(item => (
-                        <div key={item.id} className="bg-white p-6 border border-[#E5E1DB] flex flex-col relative">
-                          <div className="absolute top-0 left-0 w-full h-[2px] bg-[#A68966]"></div>
+                        <div key={item.id} className="bg-white p-6 border border-[#E5E1DB] shadow-sm flex flex-col relative">
+                          <div className="absolute top-0 left-0 w-full h-[3px] bg-[#A68966]"></div>
                           
-                          <div className="flex justify-between items-start pb-4 border-b border-dashed border-[#E5E1DB] mb-6">
-                            <div className="flex items-center text-[#2D2926] font-serif text-xl">
-                              <BedDouble className="w-5 h-5 mr-3 text-[#A68966]" />
+                          <div className="flex justify-between items-start pb-4 border-b border-dashed border-[#E5E1DB] mb-5">
+                            <div className="flex items-center text-[#2D2926] font-serif text-2xl font-bold">
+                              <BedDouble className="w-5 h-5 mr-2.5 text-[#A68966]" />
                               Room {item.roomId}
                             </div>
-                            <div className="flex items-center text-[10px] uppercase tracking-widest text-[#8C857D] font-medium">
-                              <Clock className="w-3 h-3 mr-1.5" />
-                              {formatDistanceToNow(item.createdAt, { addSuffix: true })}
-                            </div>
+                            <span className="inline-flex items-center px-2.5 py-1 bg-amber-50 border border-amber-200 text-amber-800 text-[10px] uppercase font-bold tracking-wider">
+                              In Room — Needs Collection
+                            </span>
                           </div>
                           
                           <div className="flex-1">
-                            <h4 className="text-[10px] uppercase tracking-[0.2em] text-[#8C857D] font-bold mb-3">Item Borrowed</h4>
-                            <p className="text-[#2D2926] font-medium">{item.itemName}</p>
+                            <h4 className="text-[10px] uppercase tracking-[0.2em] text-[#8C857D] font-bold mb-1.5">Delivered Appliance</h4>
+                            <p className="text-lg font-semibold text-[#2D2926]">{item.itemName}</p>
+                            <div className="mt-3 flex items-center text-[11px] text-[#8C857D]">
+                              <Clock className="w-3.5 h-3.5 mr-1.5 text-[#A68966]" />
+                              Delivered {formatDistanceToNow(item.createdAt, { addSuffix: true })}
+                            </div>
                           </div>
                           
-                          <div className="mt-8 pt-6 border-t border-dashed border-[#E5E1DB]">
+                          <div className="mt-6 pt-5 border-t border-dashed border-[#E5E1DB] flex items-center gap-2">
                             <button 
                               onClick={() => handleMarkReturned(item.id!, item.itemName)}
-                              className="w-full bg-[#A68966] text-white py-3 text-[10px] uppercase tracking-[0.2em] font-medium hover:bg-[#8E7455] transition-colors flex items-center justify-center"
+                              className="flex-1 bg-[#2D2926] text-white py-2.5 px-3 text-xs font-semibold uppercase tracking-wider hover:bg-[#A68966] transition-colors flex items-center justify-center gap-2"
+                              title="Click once you collect the item back from the room"
                             >
-                              <CheckCircle2 className="w-3.5 h-3.5 mr-2" />
-                              Mark as Returned
+                              <CheckCircle2 className="w-4 h-4 text-[#A68966]" />
+                              <span>Collect & Return</span>
+                            </button>
+                            <button
+                              onClick={() => handleDeleteBorrowed(item.id!, item.itemName)}
+                              className="p-2.5 text-[#8C857D] hover:text-red-600 hover:bg-red-50 border border-[#E5E1DB] transition-colors"
+                              title="Remove this card from dashboard view (keeps database history safe)"
+                            >
+                              <Trash2 className="w-4 h-4" />
                             </button>
                           </div>
                         </div>
@@ -237,66 +925,83 @@ export default function StaffDashboard() {
   );
 }
 
-function RequestCard({ request, onComplete, onDelete }: { request: RoomRequest, onComplete?: () => void, onDelete: () => void }) {
-  const isPending = request.status === 'pending';
-  
+function RoomGroupCard({ 
+  roomId, 
+  requests, 
+  onComplete, 
+  onDelete, 
+  isPending 
+}: { 
+  roomId: string, 
+  requests: RoomRequest[], 
+  onComplete: (id: string) => void, 
+  onDelete: (id: string) => void,
+  isPending: boolean
+}) {
   return (
     <div className={`bg-white p-6 border ${isPending ? 'border-[#A68966]' : 'border-[#E5E1DB]'} flex flex-col h-full relative`}>
       {isPending && <div className="absolute top-0 left-0 w-full h-[2px] bg-[#A68966]"></div>}
       
-      <div className="flex justify-between items-start pb-4 border-b border-dashed border-[#E5E1DB] mb-6">
+      <div className="flex justify-between items-center pb-4 border-b border-dashed border-[#E5E1DB] mb-6">
         <div className="flex items-center text-[#2D2926] font-serif text-xl">
           <BedDouble className="w-5 h-5 mr-3 text-[#A68966]" />
-          Room {request.roomId}
+          Room {roomId}
         </div>
-        <div className="flex items-center text-[10px] uppercase tracking-widest text-[#8C857D] font-medium">
-          <Clock className="w-3 h-3 mr-1.5" />
-          {formatDistanceToNow(request.createdAt, { addSuffix: true })}
+        <div className="text-[10px] uppercase tracking-widest text-[#8C857D] font-medium bg-[#F9F7F4] px-2 py-1 border border-[#E5E1DB]">
+          {requests.length} Request{requests.length !== 1 ? 's' : ''}
         </div>
       </div>
 
       <div className="flex-1 space-y-6">
-        {request.items && request.items.length > 0 && (
-          <div>
-            <h4 className="text-[10px] uppercase tracking-[0.2em] text-[#8C857D] font-bold mb-3">Requested Items</h4>
-            <div className="flex flex-wrap gap-2">
-              {request.items.map((item, idx) => (
-                <span key={idx} className="bg-[#F9F7F4] border border-[#E5E1DB] text-[#2D2926] px-3 py-1.5 text-[10px] font-medium uppercase tracking-widest">
-                  {item}
-                </span>
-              ))}
+        {requests.map((request, idx) => (
+          <div key={request.id || idx} className="relative">
+            <div className="flex justify-between items-start mb-2">
+              <div className="flex items-center text-[10px] uppercase tracking-widest text-[#8C857D] font-medium">
+                <Clock className="w-3 h-3 mr-1.5" />
+                {formatDistanceToNow(request.createdAt, { addSuffix: true })}
+              </div>
             </div>
-          </div>
-        )}
+            
+            <div className="space-y-3 pl-4 border-l-2 border-[#E5E1DB]">
+              {request.items && request.items.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {request.items.map((item, itemIdx) => (
+                    <span key={itemIdx} className="bg-[#F9F7F4] border border-[#E5E1DB] text-[#2D2926] px-3 py-1 text-[10px] font-medium uppercase tracking-widest">
+                      {item}
+                    </span>
+                  ))}
+                </div>
+              )}
+              
+              {request.customMessage && (
+                <p className="text-[#2D2926] text-sm bg-[#F9F7F4] p-3 border border-[#E5E1DB] italic">
+                  "{request.customMessage}"
+                </p>
+              )}
+            </div>
 
-        {request.customMessage && (
-          <div>
-            <h4 className="text-[10px] uppercase tracking-[0.2em] text-[#8C857D] font-bold mb-3">Message</h4>
-            <p className="text-[#2D2926] text-sm bg-[#F9F7F4] p-4 border border-[#E5E1DB] italic">
-              "{request.customMessage}"
-            </p>
+            <div className="mt-3 flex gap-2 justify-end">
+              {isPending && (
+                <button 
+                  onClick={() => onComplete(request.id!)}
+                  className="bg-[#A68966] text-white px-3 py-1.5 text-[10px] uppercase tracking-[0.2em] font-medium hover:bg-[#8E7455] transition-colors flex items-center"
+                >
+                  <CheckCircle2 className="w-3 h-3 mr-1" />
+                  Mark Done
+                </button>
+              )}
+              <button 
+                onClick={() => onDelete(request.id!)}
+                className={`p-1.5 text-[#8C857D] hover:text-red-500 hover:bg-[#F9F7F4] border border-transparent hover:border-[#E5E1DB] transition-colors ${!isPending ? 'border border-[#E5E1DB]' : ''}`}
+                title="Delete request"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            
+            {idx < requests.length - 1 && <div className="my-4 border-b border-dashed border-[#E5E1DB]" />}
           </div>
-        )}
-      </div>
-
-      <div className="mt-8 flex gap-3 pt-6 border-t border-dashed border-[#E5E1DB]">
-        {isPending && (
-          <button 
-            onClick={onComplete}
-            className="flex-1 bg-[#A68966] text-white py-3 text-[10px] uppercase tracking-[0.2em] font-medium hover:bg-[#8E7455] transition-colors flex items-center justify-center"
-          >
-            <CheckCircle2 className="w-3.5 h-3.5 mr-2" />
-            Mark Done
-          </button>
-        )}
-        <button 
-          onClick={onDelete}
-          className={`p-3 text-[#8C857D] hover:text-red-500 hover:bg-[#F9F7F4] border border-transparent hover:border-[#E5E1DB] transition-colors ${!isPending ? 'w-full flex items-center justify-center border border-[#E5E1DB]' : ''}`}
-          title="Delete request"
-        >
-          <Trash2 className="w-4 h-4" />
-          {!isPending && <span className="ml-2 text-[10px] uppercase tracking-[0.2em] font-medium">Delete</span>}
-        </button>
+        ))}
       </div>
     </div>
   );

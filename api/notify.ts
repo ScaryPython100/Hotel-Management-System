@@ -3,9 +3,40 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  const { roomNumber, items, customMessage } = req.body;
+  const { roomNumber, items, customMessage, id: providedId } = req.body;
   
   const formattedMessage = `New Room Request:\n\n- Room: ${roomNumber}\n- Items: ${items && items.length > 0 ? items.join(", ") : "None"}\n- Note: ${customMessage || "None"}`;
+
+  // 1. Sync to Supabase if credentials are configured
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY)?.trim();
+
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const supaPayload = {
+        id: providedId || `srv-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+        room_id: String(roomNumber || "Unknown"),
+        items: Array.isArray(items) ? items : [],
+        custom_message: customMessage || "",
+        status: "pending",
+        created_at: Date.now(),
+        updated_at: new Date().toISOString()
+      };
+
+      await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
+        method: "POST",
+        headers: {
+          "apikey": supabaseKey,
+          "Authorization": `Bearer ${supabaseKey}`,
+          "Content-Type": "application/json",
+          "Prefer": "resolution=merge-duplicates"
+        },
+        body: JSON.stringify(supaPayload)
+      }).catch(e => console.warn("[SUPABASE Vercel] Write error:", e?.message));
+    } catch (err: any) {
+      console.warn("[SUPABASE Vercel] Exception:", err?.message);
+    }
+  }
 
   console.log(`[RESEND EMAIL] Dispatching Email alert from Vercel...`);
   

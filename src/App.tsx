@@ -4,6 +4,7 @@
  */
 
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { Analytics } from "@vercel/analytics/react";
 import GuestView from "./pages/GuestView";
 import StaffDashboard from "./pages/StaffDashboard";
 import StaffLayout from "./pages/StaffLayout";
@@ -27,6 +28,7 @@ export default function App() {
         {/* Guest View using secure hash */}
         <Route path="/room/:hash" element={<GuestView />} />
       </Routes>
+      <Analytics />
     </BrowserRouter>
   );
 }
