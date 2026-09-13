@@ -5,7 +5,7 @@ import { db } from "../lib/firebase";
 import { COMMON_ITEMS, DEFAULT_ROOMS, Room } from "../types";
 import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
-import { Check, Loader2, Info, ArrowRight, BedDouble, Minus, Plus, Trash2, Clock } from "lucide-react";
+import { Check, Loader2, Info, ArrowRight, BedDouble, Minus, Plus } from "lucide-react";
 
 // Fast local resolver: resolves in 0 milliseconds
 function resolveRoomInstantly(hash?: string): string | null {
@@ -54,61 +54,6 @@ export default function GuestView() {
   const [customMessage, setCustomMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
-  const [roomRequests, setRoomRequests] = useState<any[]>([]);
-
-  // Sync room requests for this guest room
-  useEffect(() => {
-    if (!roomNumber) return;
-
-    // Initial check from local storage
-    try {
-      const saved = localStorage.getItem("hues_stay_requests");
-      if (saved) {
-        const all = JSON.parse(saved);
-        const filtered = all.filter((r: any) => String(r.roomId) === String(roomNumber));
-        setRoomRequests(filtered);
-      }
-    } catch (e) {}
-
-    const fetchGuestRequests = async () => {
-      try {
-        const res = await fetch("/api/requests");
-        if (res.ok) {
-          const data = await res.json();
-          if (data.requests && Array.isArray(data.requests)) {
-            const filtered = data.requests.filter((r: any) => String(r.roomId) === String(roomNumber));
-            setRoomRequests(filtered);
-          }
-        }
-      } catch (e) {}
-    };
-
-    fetchGuestRequests();
-    const interval = setInterval(fetchGuestRequests, 4000);
-    return () => clearInterval(interval);
-  }, [roomNumber]);
-
-  const handleGuestDeleteRequest = async (id: string) => {
-    // 1. Optimistic removal from guest view
-    setRoomRequests(prev => prev.filter(r => r.id !== id));
-    
-    // 2. Remove from local storage
-    try {
-      const saved = localStorage.getItem("hues_stay_requests");
-      if (saved) {
-        const all = JSON.parse(saved);
-        const next = all.filter((r: any) => r.id !== id);
-        localStorage.setItem("hues_stay_requests", JSON.stringify(next));
-      }
-    } catch (e) {}
-
-    // 3. Inform server to dismiss from view while strictly preserving in Supabase backend
-    try {
-      await fetch(`/api/requests/${id}`, { method: 'DELETE' });
-    } catch (e) {}
-
-    toast.success("Request removed from your screen (record preserved).");
-  };
 
   // Cached inventory with default stock values (0ms render time)
   const [inventory, setInventory] = useState<Record<string, { inUse: number, limit: number }>>(() => {
@@ -592,67 +537,6 @@ export default function GuestView() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6">
-        {/* Active & Recent Requests for Room with Guest Delete Option */}
-        {roomRequests.length > 0 && (
-          <div className="mb-8 bg-white border border-[#E5E1DB] p-5 shadow-xs">
-            <div className="flex items-center justify-between mb-3 border-b border-[#F2EFE9] pb-2">
-              <h3 className="text-xs uppercase tracking-[0.15em] font-semibold text-[#8C857D] flex items-center gap-2">
-                <Clock className="w-3.5 h-3.5 text-[#A68966]" />
-                Your Room's Active & Recent Requests
-              </h3>
-              <span className="text-[11px] font-mono text-[#8C857D]">
-                {roomRequests.length} {roomRequests.length === 1 ? 'record' : 'records'}
-              </span>
-            </div>
-
-            <div className="space-y-2.5">
-              {roomRequests.map((req: any) => {
-                const isPending = req.status === "pending";
-                const dateStr = req.createdAt ? new Date(req.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-                return (
-                  <div 
-                    key={req.id || `req-${Math.random()}`}
-                    className="flex items-center justify-between p-3 bg-[#FAF8F5] border border-[#EBE7E1] text-xs"
-                  >
-                    <div className="flex-1 pr-4">
-                      <div className="font-serif font-medium text-[#2D2926] mb-0.5">
-                        {Array.isArray(req.items) && req.items.length > 0 ? req.items.join(", ") : "Custom Request"}
-                      </div>
-                      {req.customMessage && (
-                        <div className="text-[11px] text-[#706B65] italic">
-                          "{req.customMessage}"
-                        </div>
-                      )}
-                      <div className="text-[10px] text-[#A09890] mt-0.5 font-mono">
-                        {dateStr}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border rounded-xs ${
-                        isPending 
-                          ? "bg-amber-50 text-amber-800 border-amber-200" 
-                          : "bg-emerald-50 text-emerald-800 border-emerald-200"
-                      }`}>
-                        {isPending ? "In Progress" : "Completed"}
-                      </span>
-
-                      <button
-                        type="button"
-                        onClick={() => handleGuestDeleteRequest(req.id)}
-                        className="p-1.5 text-[#8C857D] hover:text-red-600 hover:bg-red-50 border border-[#E5E1DB] transition-colors rounded-xs"
-                        title="Clear request from screen (keeps backend record intact)"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
         <form onSubmit={handleSubmit} className="space-y-8">
           
           <section>

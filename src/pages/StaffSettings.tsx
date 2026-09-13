@@ -513,9 +513,9 @@ export default function StaffSettings() {
                     </div>
                     
                     <div className="flex items-center gap-4">
-                      <label htmlFor={`limit-${itemName}`} className="text-sm text-[#8C857D]">Total Stock:</label>
+                      <label htmlFor={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`} className="text-sm text-[#8C857D]">Total Stock:</label>
                       <input
-                        id={`limit-${itemName}`}
+                        id={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`}
                         type="number"
                         min="1"
                         value={invData.limit}
@@ -555,7 +555,7 @@ export default function StaffSettings() {
                 <div className="flex items-center justify-between">
                   <span className="text-[#8C857D]">Active Recipients:</span>
                   <span className="font-mono text-[#2D2926] font-medium">
-                    {emailStatus?.recipients?.length ? emailStatus.recipients.join(", ") : "alamuri.kishan@gmail.com, raghu.alamuri@gmail.com"}
+                    {emailStatus?.recipients?.length ? emailStatus.recipients.join(", ") : "alamuri.kishan@gmail.com"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">

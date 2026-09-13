@@ -460,7 +460,7 @@ async function startServer() {
       return { success: false, error: "RESEND_API_KEY not configured" };
     }
 
-    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com, raghu.alamuri@gmail.com";
+    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com";
     const toEmails = rawRecipients
       .split(",")
       .map(e => e.trim())
@@ -473,53 +473,144 @@ async function startServer() {
     const fromAddress = process.env.RESEND_FROM_EMAIL?.trim() || "Hues Stay Concierge <onboarding@resend.dev>";
     const timestamp = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
 
-    const plainText = `New Guest Request - Room ${roomNumber}\n\n` +
-      `Room Number: ${roomNumber}\n` +
-      `Time: ${timestamp}\n` +
-      `Items Requested: ${items && items.length > 0 ? items.join(", ") : "None"}\n` +
-      `Guest Note: ${customMessage || "None"}\n\n` +
-      `Please check the Staff Dashboard to assign or mark this request as completed.`;
+    const plainText = `🛎️ NEW GUEST REQUEST - ROOM ${roomNumber}\n` +
+      `==========================================\n\n` +
+      `Room: Room ${roomNumber}\n` +
+      `Time: ${timestamp}\n\n` +
+      `Items Requested:\n` +
+      `${items && items.length > 0 ? items.map(i => `  • ${i}`).join("\n") : "  (No specific items)"}\n\n` +
+      (customMessage ? `Guest Note:\n  "${customMessage}"\n\n` : "") +
+      `Open Staff Dashboard to attend to this request.\n` +
+      `https://ais-dev-6pq7a4aadlk33uog2vbo7m-437727623674.asia-southeast1.run.app/staff\n\n` +
+      `---\nHues Stay Automated Concierge System`;
 
-    const htmlContent = `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 580px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e1db; border-radius: 8px; overflow: hidden;">
-        <div style="background-color: #2D2926; padding: 24px; text-align: center; color: #ffffff;">
-          <h1 style="margin: 0; font-size: 20px; font-family: serif; letter-spacing: 0.1em; text-transform: uppercase;">Hues Stay Concierge</h1>
-          <p style="margin: 6px 0 0 0; font-size: 12px; color: #d5d1cb; letter-spacing: 0.05em;">New Room Service Request</p>
-        </div>
-        
-        <div style="padding: 28px 24px;">
-          <div style="background-color: #f9f7f4; border-left: 4px solid #a68966; padding: 16px; margin-bottom: 24px; border-radius: 4px;">
-            <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #8c857d; font-weight: bold; display: block; margin-bottom: 4px;">Room</span>
-            <span style="font-size: 24px; font-weight: bold; color: #2d2926; font-family: serif;">Room ${roomNumber}</span>
-            <span style="float: right; font-size: 12px; color: #8c857d; margin-top: 6px;">${timestamp}</span>
-          </div>
+    const htmlContent = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>New Guest Request - Room ${roomNumber}</title>
+  <style type="text/css">
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+    body { margin: 0; padding: 0; width: 100% !important; background-color: #F4F1EA; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+  </style>
+</head>
+<body style="margin: 0; padding: 30px 10px; background-color: #F4F1EA; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #2D2926; -webkit-font-smoothing: antialiased;">
+  <table border="0" cellpadding="0" cellspacing="0" width="100%">
+    <tr>
+      <td align="center">
+        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; background-color: #FFFFFF; border: 1px solid #E5E1DB; border-radius: 6px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.06);">
+          
+          <!-- Header Banner -->
+          <tr>
+            <td style="background-color: #1A1A1A; padding: 28px 30px; text-align: center;">
+              <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td align="center">
+                    <span style="display: inline-block; font-size: 10px; letter-spacing: 0.25em; text-transform: uppercase; color: #A68966; font-weight: 700; margin-bottom: 6px;">HUES STAY LUXURY SUITES</span>
+                    <h1 style="margin: 0; color: #FFFFFF; font-size: 22px; font-family: Georgia, 'Times New Roman', serif; font-weight: 400; letter-spacing: 0.05em; font-style: italic;">New Guest Service Request</h1>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-          <div style="margin-bottom: 20px;">
-            <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #8c857d; font-weight: bold; display: block; margin-bottom: 8px;">Requested Amenities & Items:</span>
-            ${items && items.length > 0 ? `
-              <ul style="margin: 0; padding: 0; list-style: none;">
-                ${items.map(i => `
-                  <li style="padding: 8px 12px; background: #faf9f7; border: 1px solid #eee; margin-bottom: 6px; border-radius: 4px; font-size: 14px; font-weight: 500; color: #2d2926;">
-                    ✓ ${i}
-                  </li>
-                `).join("")}
-              </ul>
-            ` : '<p style="margin: 0; color: #8c857d; font-style: italic;">No specific items selected.</p>'}
-          </div>
+          <!-- Main Content Area -->
+          <tr>
+            <td style="padding: 32px 30px;">
+              
+              <!-- Room & Timestamp Card -->
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #FAF8F5; border: 1px solid #EBE7E1; border-left: 4px solid #A68966; border-radius: 4px; margin-bottom: 24px;">
+                <tr>
+                  <td style="padding: 16px 20px;">
+                    <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td align="left">
+                          <span style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: #8C857D; font-weight: 700; display: block; margin-bottom: 2px;">ROOM NUMBER</span>
+                          <span style="font-size: 26px; font-weight: 700; color: #2D2926; font-family: Georgia, 'Times New Roman', serif;">Room ${roomNumber}</span>
+                        </td>
+                        <td align="right" valign="bottom">
+                          <span style="font-size: 11px; color: #8C857D; font-family: monospace; background: #FFFFFF; border: 1px solid #E5E1DB; padding: 4px 8px; border-radius: 3px; display: inline-block;">
+                            ${timestamp}
+                          </span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
 
-          ${customMessage ? `
-            <div style="margin-bottom: 24px; background: #fdfbf7; border: 1px dashed #d5d1cb; padding: 14px; border-radius: 4px;">
-              <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #8c857d; font-weight: bold; display: block; margin-bottom: 4px;">Guest Note:</span>
-              <p style="margin: 0; font-size: 14px; color: #2d2926; font-style: italic;">"${customMessage}"</p>
-            </div>
-          ` : ''}
+              <!-- Requested Items Section -->
+              <div style="margin-bottom: 24px;">
+                <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.15em; color: #8C857D; font-weight: 700; display: block; margin-bottom: 10px;">
+                  REQUESTED ITEMS & SERVICES
+                </span>
+                
+                ${items && items.length > 0 ? `
+                  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: separate; border-spacing: 0 6px;">
+                    ${items.map(item => `
+                      <tr>
+                        <td style="background-color: #FAF8F5; border: 1px solid #EBE7E1; padding: 12px 16px; border-radius: 4px; font-size: 14px; color: #2D2926; font-weight: 500;">
+                          <span style="color: #A68966; font-weight: bold; margin-right: 8px;">✓</span> ${item}
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </table>
+                ` : `
+                  <p style="margin: 0; padding: 12px; background-color: #FAF8F5; border: 1px dashed #E5E1DB; color: #8C857D; font-size: 13px; font-style: italic; border-radius: 4px;">
+                    No specific checklist items selected.
+                  </p>
+                `}
+              </div>
 
-          <div style="text-align: center; margin-top: 28px; padding-top: 20px; border-top: 1px solid #f0ede8;">
-            <p style="font-size: 12px; color: #8c857d; margin: 0;">This is an automated alert from your Hues Stay Guest Request System.</p>
-          </div>
-        </div>
-      </div>
-    `;
+              <!-- Custom Guest Message / Note -->
+              ${customMessage ? `
+                <div style="margin-bottom: 28px;">
+                  <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.15em; color: #8C857D; font-weight: 700; display: block; margin-bottom: 8px;">
+                    SPECIAL INSTRUCTIONS / GUEST NOTE
+                  </span>
+                  <div style="background-color: #FFFDF9; border: 1px solid #EAD8C3; border-radius: 4px; padding: 16px;">
+                    <p style="margin: 0; font-size: 14px; line-height: 1.5; color: #2D2926; font-style: italic;">
+                      "${customMessage}"
+                    </p>
+                  </div>
+                </div>
+              ` : ''}
+
+              <!-- Action Button to Staff Dashboard -->
+              <table border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-top: 24px; margin-bottom: 12px;">
+                <tr>
+                  <td align="center">
+                    <a href="https://ais-dev-6pq7a4aadlk33uog2vbo7m-437727623674.asia-southeast1.run.app/staff" target="_blank" style="display: inline-block; background-color: #2D2926; color: #FFFFFF; text-decoration: none; padding: 14px 28px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.15em; border-radius: 3px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);">
+                      Open Staff Dashboard &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #FAF8F5; border-top: 1px solid #EBE7E1; padding: 20px 24px; text-align: center;">
+              <p style="margin: 0 0 4px 0; font-size: 11px; color: #8C857D;">
+                This is an automated notification from Hues Stay Guest Concierge System.
+              </p>
+              <p style="margin: 0; font-size: 10px; color: #A09890;">
+                Hues Stay &bull; Real-Time Room Request Dispatch
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
 
     console.log(`[RESEND EMAIL] Preparing notification dispatch for Room ${roomNumber} to:`, toEmails);
 
@@ -634,7 +725,7 @@ async function startServer() {
   // Diagnostic Endpoint: Check email configuration
   app.get("/api/email/status", (req, res) => {
     const apiKey = process.env.RESEND_API_KEY?.trim();
-    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com, raghu.alamuri@gmail.com";
+    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com";
     const toEmails = rawRecipients.split(",").map(e => e.trim()).filter(Boolean);
     
     res.json({
