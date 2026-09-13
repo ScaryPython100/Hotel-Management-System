@@ -24,10 +24,29 @@ import toast, { Toaster } from "react-hot-toast";
 function getDismissedRequestIds(): string[] {
   try {
     const raw = localStorage.getItem("hues_stay_dismissed_requests");
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Only accept unique IDs (req-..., srv-..., local-..., or long UUIDs) - NEVER room signatures
+    return parsed.filter((id: any) => typeof id === "string" && !id.includes("::") && (id.startsWith("req-") || id.startsWith("srv-") || id.startsWith("local-") || id.length > 20));
   } catch {
     return [];
   }
+}
+
+function normalizeApplianceName(name: string): string {
+  const lower = (name || "").toLowerCase().trim();
+  if (lower.includes("glass")) return "Glasses (Set of 2)";
+  if (lower.includes("kettle") || lower.includes("teakettle")) return "Teakettle";
+  if (lower.includes("iron")) return "Iron Box";
+  if (lower.includes("dryer")) return "Hair Dryer";
+  if (lower.includes("laptop")) return "Laptop Table";
+  if (lower.includes("massager")) return "Leg Massager (Paid)";
+  if (lower.includes("adaptor") || lower.includes("cable")) {
+    if (lower.includes("3.0")) return "USB 3.0 Adaptor + Cable";
+    return "USB 2.0 Adaptor + Cable";
+  }
+  return name.trim();
 }
 
 export default function StaffDashboard() {
@@ -38,8 +57,7 @@ export default function StaffDashboard() {
         const parsed = JSON.parse(saved);
         const dismissed = getDismissedRequestIds();
         return (Array.isArray(parsed) ? parsed : []).filter((r: RoomRequest) => 
-          !dismissed.includes(r.id || "") && 
-          !dismissed.includes(`${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`)
+          !dismissed.includes(r.id || "")
         );
       }
     } catch (e) {}
@@ -58,36 +76,22 @@ export default function StaffDashboard() {
   const [tableFilter, setTableFilter] = useState<'all' | 'pending' | 'completed'>('all');
 
   useEffect(() => {
-    // 1. Fetch from server /api/requests
+    // 1. Fetch from server /api/requests (Shared single source of truth across all devices)
     const fetchServerRequests = async () => {
       try {
         const res = await fetch("/api/requests");
         if (res.ok) {
           const data = await res.json();
           if (data.requests && Array.isArray(data.requests)) {
-            setRequests(prev => {
-              const mergedMap = new Map<string, RoomRequest>();
-              // Existing items
-              prev.forEach(r => {
-                const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
-                mergedMap.set(key, r);
-              });
-              // Server items
-              data.requests.forEach((r: RoomRequest) => {
-                const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
-                if (!mergedMap.has(key)) {
-                  mergedMap.set(key, r);
-                }
-              });
-              const dismissed = getDismissedRequestIds();
-              const combined = Array.from(mergedMap.values())
-                .filter(r => !dismissed.includes(r.id || "") && !dismissed.includes(`${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`))
-                .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-              try {
-                localStorage.setItem("hues_stay_requests", JSON.stringify(combined));
-              } catch (e) {}
-              return combined;
-            });
+            const dismissed = getDismissedRequestIds();
+            const valid = data.requests
+              .filter((r: RoomRequest) => !dismissed.includes(r.id || ""))
+              .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
+            
+            setRequests(valid);
+            try {
+              localStorage.setItem("hues_stay_requests", JSON.stringify(valid));
+            } catch (e) {}
           }
         }
       } catch (e: any) {
@@ -104,26 +108,11 @@ export default function StaffDashboard() {
         if (res.ok) {
           const data = await res.json();
           if (data.items && Array.isArray(data.items)) {
-            setBorrowedItems(prev => {
-              const mergedMap = new Map<string, BorrowedItem>();
-              prev.forEach(b => {
-                const key = b.status === "borrowed"
-                  ? `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`
-                  : b.id;
-                mergedMap.set(key, b);
-              });
-              data.items.forEach((b: BorrowedItem) => {
-                const key = b.status === "borrowed"
-                  ? `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`
-                  : b.id;
-                mergedMap.set(key, b);
-              });
-              const combined = Array.from(mergedMap.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-              try {
-                localStorage.setItem("hues_stay_borrowed", JSON.stringify(combined));
-              } catch (e) {}
-              return combined;
-            });
+            const items = data.items.sort((a: BorrowedItem, b: BorrowedItem) => (b.createdAt || 0) - (a.createdAt || 0));
+            setBorrowedItems(items);
+            try {
+              localStorage.setItem("hues_stay_borrowed", JSON.stringify(items));
+            } catch (e) {}
           }
         }
       } catch (e: any) {
@@ -132,10 +121,11 @@ export default function StaffDashboard() {
     };
     fetchServerBorrowed();
 
+    // Fast polling ensures instant sync across tabs, phones, and computers
     const interval = setInterval(() => {
       fetchServerRequests();
       fetchServerBorrowed();
-    }, 4000);
+    }, 2000);
 
     // 2. Cross-tab storage synchronization
     const handleStorageChange = (e: StorageEvent) => {
@@ -152,7 +142,7 @@ export default function StaffDashboard() {
     };
     window.addEventListener("storage", handleStorageChange);
 
-    // 3. Firestore live snapshot
+    // 3. Firestore live snapshot (optional supplement)
     const q = query(collection(db, "requests"), orderBy("createdAt", "desc"));
     
     const unsubscribeReqs = onSnapshot(q, (snapshot) => {
@@ -161,25 +151,14 @@ export default function StaffDashboard() {
         reqs.push({ id: docSnap.id, ...docSnap.data() } as RoomRequest);
       });
       if (reqs.length > 0) {
-        setRequests(prev => {
-          const mergedMap = new Map<string, RoomRequest>();
-          reqs.forEach(r => {
-            const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
-            mergedMap.set(key, r);
-          });
-          prev.forEach(r => {
-            const key = `${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`;
-            if (!mergedMap.has(key)) mergedMap.set(key, r);
-          });
-          const dismissed = getDismissedRequestIds();
-          const combined = Array.from(mergedMap.values())
-            .filter(r => !dismissed.includes(r.id || "") && !dismissed.includes(`${r.roomId}-${(r.items || []).join(',')}-${r.customMessage || ''}`))
-            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-          try {
-            localStorage.setItem("hues_stay_requests", JSON.stringify(combined));
-          } catch (e) {}
-          return combined;
-        });
+        const dismissed = getDismissedRequestIds();
+        const valid = reqs
+          .filter(r => !dismissed.includes(r.id || ""))
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setRequests(valid);
+        try {
+          localStorage.setItem("hues_stay_requests", JSON.stringify(valid));
+        } catch (e) {}
       }
       setLoading(false);
     }, (error) => {
@@ -200,10 +179,11 @@ export default function StaffDashboard() {
           createdAt: typeof d.createdAt === "number" ? d.createdAt : Date.now(),
           requestId: d.requestId ? String(d.requestId) : undefined
         };
+        const canonical = normalizeApplianceName(item.itemName);
         const key = item.status === "borrowed"
-          ? `${item.roomId.toLowerCase().trim()}::${item.itemName.toLowerCase().trim()}`
+          ? `${item.roomId.toLowerCase().trim()}::${canonical.toLowerCase()}`
           : item.id;
-        itemsMap.set(key, item);
+        itemsMap.set(key, { ...item, itemName: canonical });
       });
       const uniqueItems = Array.from(itemsMap.values());
       setBorrowedItems(uniqueItems);
@@ -400,17 +380,16 @@ export default function StaffDashboard() {
   };
 
   const handleDelete = async (id: string) => {
-    const reqToDelete = requests.find(r => r.id === id);
-    const signature = reqToDelete ? `${reqToDelete.roomId}-${(reqToDelete.items || []).join(',')}-${reqToDelete.customMessage || ''}` : '';
-
+    if (!id) return;
     if (!window.confirm("Remove this request from the dashboard view?\n\n(Note: The request record will remain permanently preserved in your Supabase database as required.)")) return;
 
-    // Save to dismissed IDs list so it does not reappear on dashboard refresh
+    // Save ONLY the specific request ID to dismissed list
     try {
       const dismissed = getDismissedRequestIds();
-      if (id && !dismissed.includes(id)) dismissed.push(id);
-      if (signature && !dismissed.includes(signature)) dismissed.push(signature);
-      localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(dismissed));
+      if (!dismissed.includes(id)) {
+        dismissed.push(id);
+        localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(dismissed));
+      }
     } catch (e) {}
 
     // Optimistic local update (instant)
@@ -431,6 +410,39 @@ export default function StaffDashboard() {
     } catch (error: any) {
       console.warn("Remote delete request error:", error?.message || "offline");
     }
+  };
+
+  const handleClearCompleted = async () => {
+    const completed = requests.filter(r => r.status === "completed");
+    if (completed.length === 0) {
+      toast.error("No completed requests to clear.");
+      return;
+    }
+    if (!window.confirm(`Clear all ${completed.length} completed requests from the dashboard view?\n\n(Note: All records remain permanently preserved in your Supabase database for records & audits).`)) {
+      return;
+    }
+
+    const completedIds = completed.map(r => r.id!).filter(Boolean);
+    try {
+      const dismissed = getDismissedRequestIds();
+      completedIds.forEach(id => {
+        if (!dismissed.includes(id)) dismissed.push(id);
+      });
+      localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(dismissed));
+    } catch (e) {}
+
+    const remaining = requests.filter(r => r.status !== "completed");
+    setRequests(remaining);
+    try {
+      localStorage.setItem("hues_stay_requests", JSON.stringify(remaining));
+    } catch (e) {}
+
+    // Tell server to soft-delete each completed item
+    for (const id of completedIds) {
+      fetch(`/api/requests/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+
+    toast.success(`Cleared ${completed.length} completed records from view.`);
   };
 
   const handleMarkReturned = async (borrowedId: string, itemName: string) => {
@@ -638,6 +650,17 @@ export default function StaffDashboard() {
                           Done ({completedRequests.length})
                         </button>
                       </div>
+
+                      {completedRequests.length > 0 && (
+                        <button
+                          onClick={handleClearCompleted}
+                          className="px-3 py-1.5 border border-red-200 text-red-700 bg-white hover:bg-red-50 text-[10px] uppercase font-bold tracking-wider transition-colors flex items-center gap-1"
+                          title="Remove all completed requests from the view (preserved in Supabase)"
+                        >
+                          <Trash2 className="w-3 h-3 text-red-500" />
+                          Clear Done ({completedRequests.length})
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -825,10 +848,20 @@ export default function StaffDashboard() {
                   {/* Completed Section */}
                   {Object.keys(completedByRoom).length > 0 && (
                     <section>
-                      <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#8C857D] mb-6 flex items-center">
-                        <CheckCircle2 className="w-4 h-4 mr-2" />
-                        Recently Completed
-                      </h3>
+                      <div className="flex items-center justify-between mb-6">
+                        <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#8C857D] flex items-center">
+                          <CheckCircle2 className="w-4 h-4 mr-2" />
+                          Recently Completed ({completedRequests.length})
+                        </h3>
+                        <button
+                          onClick={handleClearCompleted}
+                          className="px-3 py-1.5 border border-red-200 text-red-700 bg-white hover:bg-red-50 text-[10px] uppercase font-bold tracking-wider transition-colors flex items-center gap-1 cursor-pointer"
+                          title="Remove all completed requests from the view (preserved in Supabase)"
+                        >
+                          <Trash2 className="w-3 h-3 text-red-500" />
+                          Clear Done
+                        </button>
+                      </div>
                       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 opacity-70">
                         {Object.entries(completedByRoom).slice(0, 9).map(([roomId, roomReqs]) => (
                           <RoomGroupCard 

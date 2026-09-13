@@ -9,13 +9,15 @@ export const SUPABASE_INVENTORY_TABLE = "inventory";
 export const SUPABASE_TABLE_SQL = `-- Run this in Supabase SQL Editor (SQL Editor icon on left menu)
 -- Project: hues-stay-luxury-rooms
 
--- 1. Guest Requests Table
+-- Guest Requests Table (Preserves all active, completed, and dashboard-dismissed requests permanently)
 CREATE TABLE IF NOT EXISTS public.guest_requests (
     id TEXT PRIMARY KEY,
     room_id TEXT NOT NULL,
     items JSONB DEFAULT '[]'::jsonb,
     custom_message TEXT DEFAULT '',
     status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+    is_deleted_from_dashboard BOOLEAN DEFAULT false,
+    deleted_at BIGINT,
     created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::bigint,
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -33,61 +35,6 @@ CREATE POLICY "Allow service and public operations" ON public.guest_requests
     USING (true)
     WITH CHECK (true);
 
--- 2. Borrowed Items Table (For tracking appliances given to rooms that need return)
-CREATE TABLE IF NOT EXISTS public.borrowed_items (
-    id TEXT PRIMARY KEY,
-    room_id TEXT NOT NULL,
-    item_name TEXT NOT NULL,
-    status TEXT DEFAULT 'borrowed' CHECK (status IN ('borrowed', 'returned')),
-    created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::bigint,
-    returned_at TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_borrowed_items_room ON public.borrowed_items(room_id);
-CREATE INDEX IF NOT EXISTS idx_borrowed_items_status ON public.borrowed_items(status);
-
-ALTER TABLE public.borrowed_items ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Allow borrowed operations" ON public.borrowed_items
-    FOR ALL
-    USING (true)
-    WITH CHECK (true);
-
--- 3. Live Inventory Tracker Table (Total items, taken/in use, and available live count)
-CREATE TABLE IF NOT EXISTS public.inventory (
-    id TEXT PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    category TEXT DEFAULT 'Item',
-    total_stock INTEGER NOT NULL DEFAULT 1,
-    taken INTEGER NOT NULL DEFAULT 0,
-    available INTEGER GENERATED ALWAYS AS (GREATEST(0, total_stock - taken)) STORED,
-    updated_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_inventory_name ON public.inventory(name);
-
-ALTER TABLE public.inventory ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Allow inventory operations" ON public.inventory
-    FOR ALL
-    USING (true)
-    WITH CHECK (true);
-
--- Seed initial inventory items (Kettle, Iron Box, Glasses, etc.)
-INSERT INTO public.inventory (id, name, category, total_stock, taken)
-VALUES 
-    ('inv-iron-box', 'Iron Box', 'Item', 5, 0),
-    ('inv-kettle', 'Kettle', 'Item', 5, 0),
-    ('inv-hair-dryer', 'Hair Dryer', 'Item', 2, 0),
-    ('inv-laptop-table', 'Laptop Table', 'Item', 2, 0),
-    ('inv-leg-massager', 'Leg Massager (Paid)', 'Item', 1, 0),
-    ('inv-glasses', 'Water Glasses', 'Item', 10, 0),
-    ('inv-glasses-alt', 'Glasses', 'Item', 10, 0),
-    ('inv-usb-2', 'USB 2.0 Adaptor + Cable', 'Item', 2, 0),
-    ('inv-usb-3', 'USB 3.0 Adaptor + Cable', 'Item', 2, 0)
-ON CONFLICT (name) DO UPDATE 
-SET total_stock = EXCLUDED.total_stock;
-
 -- Enable Realtime events for live updates (optional)
 DO $$
 BEGIN
@@ -96,12 +43,6 @@ BEGIN
     WHERE pubname = 'supabase_realtime' AND tablename = 'guest_requests'
   ) THEN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.guest_requests;
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_publication_tables 
-    WHERE pubname = 'supabase_realtime' AND tablename = 'inventory'
-  ) THEN
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.inventory;
   END IF;
 EXCEPTION WHEN OTHERS THEN
   NULL;
@@ -202,6 +143,32 @@ export async function updateRequestStatusInSupabase(id: string, status: "pending
 }
 
 /**
+ * Mark request as deleted from active dashboard view in Supabase (strictly preserving the data row)
+ */
+export async function markRequestDeletedFromDashboardInSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const { error } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .update({
+        is_deleted_from_dashboard: true,
+        deleted_at: Date.now(),
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", id);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}
+
+/**
  * Delete request from Supabase
  */
 export async function deleteRequestFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
@@ -224,17 +191,23 @@ export async function deleteRequestFromSupabase(id: string): Promise<{ success: 
 }
 
 /**
- * Fetch all requests from Supabase
+ * Fetch all active requests from Supabase (excluding records marked as deleted from dashboard)
  */
-export async function fetchRequestsFromSupabase(): Promise<RequestRecord[] | null> {
+export async function fetchRequestsFromSupabase(includeDeleted = false): Promise<RequestRecord[] | null> {
   const supabase = getSupabase();
   if (!supabase) return null;
 
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from(SUPABASE_TABLE_NAME)
       .select("*")
       .order("created_at", { ascending: false });
+
+    if (!includeDeleted) {
+      query = query.or("is_deleted_from_dashboard.is.null,is_deleted_from_dashboard.eq.false");
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.warn("[SUPABASE] Query error:", error.message);
@@ -258,16 +231,13 @@ export async function fetchRequestsFromSupabase(): Promise<RequestRecord[] | nul
 }
 
 /**
- * Check connection status and whether the table exists
+ * Check connection status and whether the guest_requests table exists
  */
 export async function getSupabaseStatus(): Promise<{
   configured: boolean;
   url?: string;
   tableExists: boolean;
-  inventoryTableExists?: boolean;
-  borrowedTableExists?: boolean;
   count: number;
-  inventoryCount?: number;
   error?: string;
   sql: string;
 }> {
@@ -289,22 +259,11 @@ export async function getSupabaseStatus(): Promise<{
       .from(SUPABASE_TABLE_NAME)
       .select("*", { count: "exact", head: true });
 
-    const { count: invCount, error: invError } = await supabase
-      .from(SUPABASE_INVENTORY_TABLE)
-      .select("*", { count: "exact", head: true });
-
-    const { error: borError } = await supabase
-      .from(SUPABASE_BORROWED_TABLE)
-      .select("*", { count: "exact", head: true });
-
     return {
       configured: true,
       url: url.replace(/(https?:\/\/)([^.]+)(\..*)/, "$1$2$3"),
       tableExists: !reqError,
-      inventoryTableExists: !invError,
-      borrowedTableExists: !borError,
       count: reqCount || 0,
-      inventoryCount: invCount || 0,
       error: reqError ? reqError.message : undefined,
       sql: SUPABASE_TABLE_SQL
     };
@@ -326,6 +285,7 @@ export interface BorrowedRecord {
   status: "borrowed" | "returned";
   createdAt: number;
   returnedAt?: number;
+  requestId?: string;
 }
 
 export async function saveBorrowedToSupabase(b: BorrowedRecord): Promise<{ success: boolean; error?: string }> {

@@ -20,6 +20,7 @@ export interface AmenityItem {
   isLimited?: boolean;
   category: 'Service' | 'Item';
   defaultLimit?: number;
+  unitMultiplier?: number;
 }
 
 export const COMMON_ITEMS: AmenityItem[] = [
@@ -28,20 +29,20 @@ export const COMMON_ITEMS: AmenityItem[] = [
   { name: "Shampoo Refill", category: "Service" },
   { name: "Hand wash Refill", category: "Service" },
   { name: "Wifi Password Request", category: "Service" },
-  { name: "Extend the Stay", category: "Service" },
-  { name: "Room Service Required (message before 9am)", category: "Service" },
+  { name: "Extend the Stay (Inform Supervisor via Call)", category: "Service" },
+  { name: "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)", category: "Service" },
   { name: "Water Bottle (Paid)", category: "Service" },
   { name: "Laundry wash assistance (Paid, self responsibility)", category: "Service" },
   
   // Items (Inventory)
-  { name: "Iron Box", isLimited: true, category: "Item", defaultLimit: 5 },
-  { name: "Kettle", isLimited: true, category: "Item", defaultLimit: 5 },
-  { name: "Hair Dryer", isLimited: true, category: "Item", defaultLimit: 2 },
-  { name: "Laptop Table", isLimited: true, category: "Item", defaultLimit: 2 },
-  { name: "Leg Massager (Paid)", isLimited: true, category: "Item", defaultLimit: 1 },
-  { name: "Water Glasses", isLimited: true, category: "Item", defaultLimit: 10 },
-  { name: "USB 2.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2 },
-  { name: "USB 3.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2 }
+  { name: "Iron Box", isLimited: true, category: "Item", defaultLimit: 5, unitMultiplier: 1 },
+  { name: "Teakettle", isLimited: true, category: "Item", defaultLimit: 5, unitMultiplier: 1 },
+  { name: "Hair Dryer", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
+  { name: "Laptop Table", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
+  { name: "Leg Massager (Paid)", isLimited: true, category: "Item", defaultLimit: 1, unitMultiplier: 1 },
+  { name: "Glasses (Set of 2)", isLimited: true, category: "Item", defaultLimit: 10, unitMultiplier: 2 },
+  { name: "USB 2.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
+  { name: "USB 3.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 }
 ];
 
 export interface InventoryItem {
@@ -75,12 +76,26 @@ export function extractItemQuantity(itemString: string): number {
   return 1;
 }
 
+export function getItemUnitConsumption(itemName: string): number {
+  if (!itemName) return 1;
+  const clean = itemName.toLowerCase().trim();
+  if (clean.includes("glasses (set of 2)") || clean.includes("glasses") || clean.includes("glass")) {
+    return 2;
+  }
+  return 1;
+}
+
 export function isReturnableItem(name: string): boolean {
   if (!name) return false;
   const clean = extractBaseItemName(name).trim().toLowerCase();
 
-  // Glass / Water Glasses is physical & returnable
-  if (clean === 'glasses' || clean === 'water glasses' || clean.includes('water glass') || clean.includes('glass')) {
+  // Glass / Glasses (Set of 2) is physical & returnable
+  if (clean.includes('glass')) {
+    return true;
+  }
+
+  // Teakettle / Kettle is physical & returnable
+  if (clean.includes('kettle') || clean.includes('teakettle')) {
     return true;
   }
 
@@ -88,7 +103,7 @@ export function isReturnableItem(name: string): boolean {
   const nonReturnableKeywords = [
     'water bottle', 'bottle', 'plastic', 'soap', 'shampoo', 
     'hand wash', 'refill', 'wifi', 'extend', 'laundry', 
-    'room service', 'tea bag', 'coffee', 'sugar'
+    'housekeeping', 'room service', 'tea bag', 'coffee', 'sugar'
   ];
   if (nonReturnableKeywords.some(kw => clean.includes(kw))) {
     return false;
@@ -96,11 +111,10 @@ export function isReturnableItem(name: string): boolean {
 
   const found = COMMON_ITEMS.find(i => i.name.toLowerCase() === clean);
   if (found) {
-    // Only physical Items (e.g. Kettle, Iron Box, Hair Dryer, Laptop Table, Adapters, Glasses) that are not consumable
     return found.category === 'Item';
   }
 
-  return false;
+  return true;
 }
 
 export const DEFAULT_ROOMS: Room[] = [

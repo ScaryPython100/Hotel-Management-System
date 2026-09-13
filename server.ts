@@ -6,19 +6,27 @@ import {
   saveRequestToSupabase,
   updateRequestStatusInSupabase,
   deleteRequestFromSupabase,
+  markRequestDeletedFromDashboardInSupabase,
   fetchRequestsFromSupabase,
   getSupabaseStatus,
-  saveBorrowedToSupabase,
-  markBorrowedReturnedInSupabase,
-  fetchBorrowedFromSupabase,
-  fetchInventoryFromSupabase,
-  upsertInventoryInSupabase,
-  adjustInventoryTakenInSupabase,
   BorrowedRecord,
-  SupabaseInventoryRecord,
   SUPABASE_TABLE_SQL,
   SUPABASE_TABLE_NAME
 } from "./src/lib/supabaseServer";
+import { isReturnableItem, getItemUnitConsumption } from "./src/types";
+
+function extractBaseApplianceName(name: string): string {
+  const clean = String(name || "").toLowerCase().trim();
+  if (clean.includes("glass")) return "glasses";
+  if (clean.includes("kettle")) return "kettle";
+  if (clean.includes("iron")) return "iron";
+  if (clean.includes("dryer")) return "hair dryer";
+  if (clean.includes("laptop")) return "laptop table";
+  if (clean.includes("massager")) return "leg massager";
+  if (clean.includes("usb 2")) return "usb 2.0";
+  if (clean.includes("usb 3")) return "usb 3.0";
+  return clean;
+}
 
 const app = express();
 const PORT = 3000;
@@ -33,28 +41,64 @@ interface ServerRequest {
 }
 
 // In-memory requests store on server
-const serverRequests: ServerRequest[] = [
-  {
-    id: "req-102-kettle",
-    roomId: "102",
-    items: ["Kettle"],
-    customMessage: "",
-    status: "pending",
-    createdAt: Date.now() - (25 * 60 * 1000),
-  },
-  {
-    id: "req-101-initial",
-    roomId: "101",
-    items: ["Soap Refill", "Shampoo Refill", "Hand wash Refill", "Iron Box"],
-    customMessage: "abcd",
-    status: "pending",
-    createdAt: Date.now() - (30 * 60 * 1000),
-  }
-];
+const serverRequests: ServerRequest[] = [];
 
 // In-memory borrowed items store
 const serverBorrowed: BorrowedRecord[] = [];
 const serverDismissedRequests = new Set<string>();
+
+// Canonical inventory stock limits (stored in-memory on server, synced across all clients)
+const serverInventoryLimits: Record<string, number> = {
+  "Iron Box": 5,
+  "Teakettle": 5,
+  "Hair Dryer": 2,
+  "Laptop Table": 2,
+  "Leg Massager (Paid)": 1,
+  "Glasses (Set of 2)": 10,
+  "USB 2.0 Adaptor + Cable": 2,
+  "USB 3.0 Adaptor + Cable": 2
+};
+
+function calculateItemTaken(itemName: string): number {
+  const clean = itemName.toLowerCase().trim();
+  const isGlass = clean.includes("glass");
+  const isKettle = clean.includes("kettle") || clean.includes("teakettle");
+  const multiplier = isGlass ? 2 : 1;
+
+  let taken = 0;
+
+  // 1. Pending requests
+  for (const r of serverRequests) {
+    if (r.status === "pending" && Array.isArray(r.items)) {
+      for (const item of r.items) {
+        const itemClean = String(item).toLowerCase();
+        if (isGlass && itemClean.includes("glass")) {
+          taken += multiplier;
+        } else if (isKettle && (itemClean.includes("kettle") || itemClean.includes("teakettle"))) {
+          taken += multiplier;
+        } else if (!isGlass && !isKettle && itemClean.includes(clean)) {
+          taken += multiplier;
+        }
+      }
+    }
+  }
+
+  // 2. Active borrowed items in rooms
+  for (const b of serverBorrowed) {
+    if (b.status === "borrowed") {
+      const bClean = String(b.itemName).toLowerCase();
+      if (isGlass && bClean.includes("glass")) {
+        taken += multiplier;
+      } else if (isKettle && (bClean.includes("kettle") || bClean.includes("teakettle"))) {
+        taken += multiplier;
+      } else if (!isGlass && !isKettle && bClean.includes(clean)) {
+        taken += multiplier;
+      }
+    }
+  }
+
+  return taken;
+}
 
 // Canonical 22 hotel rooms
 const serverRooms: Array<{ id: string; roomNumber: string; qrCodeHash: string; status: "occupied" | "vacant" }> = [
@@ -109,15 +153,19 @@ async function startServer() {
   });
 
   // DELETE / dismiss request from active dashboard/screen views (STRICTLY PRESERVED in Supabase database)
-  app.delete("/api/requests/:id", (req, res) => {
+  app.delete("/api/requests/:id", async (req, res) => {
     const { id } = req.params;
     serverDismissedRequests.add(id);
     const idx = serverRequests.findIndex(r => r.id === id);
     if (idx !== -1) {
       serverRequests.splice(idx, 1);
     }
+    // Update Supabase to mark as dismissed from dashboard without deleting the record
+    markRequestDeletedFromDashboardInSupabase(id).catch(err => {
+      console.warn("[SUPABASE] Mark dismissed flag error:", err?.message || err);
+    });
     console.log(`[REQUESTS] Request ${id} dismissed from dashboard view (remains preserved permanently in Supabase table)`);
-    res.json({ success: true, message: "Request dismissed from view (preserved in Supabase database)" });
+    res.json({ success: true, message: "Request dismissed from dashboard view (preserved in Supabase database)" });
   });
 
   // POST new request
@@ -157,42 +205,23 @@ async function startServer() {
     res.json({ success: true, request: newReq });
   });
 
-  // GET borrowed items (from Supabase or memory, deduplicated by active room & appliance)
-  app.get("/api/borrowed", async (req, res) => {
-    try {
-      const supaItems = await fetchBorrowedFromSupabase();
-      if (supaItems && supaItems.length > 0) {
-        const mergedMap = new Map<string, BorrowedRecord>();
-        // Group and deduplicate active items by room & itemName
-        serverBorrowed.forEach(b => {
-          const key = b.status === "borrowed"
-            ? `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`
-            : b.id;
-          mergedMap.set(key, b);
-        });
-        supaItems.forEach(b => {
-          const key = b.status === "borrowed"
-            ? `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`
-            : b.id;
-          mergedMap.set(key, b);
-        });
-        return res.json({ success: true, items: Array.from(mergedMap.values()) });
-      }
-    } catch (e: any) {
-      console.warn("[BORROWED] Supabase fetch error:", e?.message);
-    }
+  // GET borrowed items (deduplicated by active room & appliance)
+  app.get("/api/borrowed", (req, res) => {
     const dedupMap = new Map<string, BorrowedRecord>();
     serverBorrowed.forEach(b => {
+      const baseName = extractBaseApplianceName(b.itemName);
       const key = b.status === "borrowed"
-        ? `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`
+        ? `${b.roomId.toLowerCase().trim()}::${baseName}`
         : b.id;
-      dedupMap.set(key, b);
+      if (!dedupMap.has(key)) {
+        dedupMap.set(key, b);
+      }
     });
     res.json({ success: true, items: Array.from(dedupMap.values()) });
   });
 
   // POST newly borrowed item (when staff delivers item and marks request done)
-  app.post("/api/borrowed", async (req, res) => {
+  app.post("/api/borrowed", (req, res) => {
     const { roomId, itemName, id: providedId, requestId } = req.body;
     if (!roomId || !itemName) {
       return res.status(400).json({ error: "Missing roomId or itemName" });
@@ -202,82 +231,68 @@ async function startServer() {
       roomId: String(roomId),
       itemName: String(itemName),
       status: "borrowed",
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      requestId: requestId ? String(requestId) : undefined
     };
 
-    // Store in memory
-    const existingIdx = serverBorrowed.findIndex(b => b.id === itemRecord.id || (b.roomId === itemRecord.roomId && b.itemName === itemRecord.itemName && b.status === "borrowed"));
+    const baseName = extractBaseApplianceName(itemRecord.itemName);
+
+    // Strictly check for existing active borrowed record to prevent duplicates
+    const existingIdx = serverBorrowed.findIndex(
+      b => b.id === itemRecord.id || 
+          (b.requestId && itemRecord.requestId && b.requestId === itemRecord.requestId && extractBaseApplianceName(b.itemName) === baseName) ||
+          (b.roomId.trim().toLowerCase() === itemRecord.roomId.trim().toLowerCase() && 
+           extractBaseApplianceName(b.itemName) === baseName && 
+           b.status === "borrowed")
+    );
     if (existingIdx === -1) {
       serverBorrowed.unshift(itemRecord);
+    } else {
+      // Update existing record rather than creating a duplicate
+      serverBorrowed[existingIdx] = {
+        ...serverBorrowed[existingIdx],
+        itemName: itemRecord.itemName,
+        status: "borrowed"
+      };
     }
-
-    // Persist to Supabase borrowed table
-    saveBorrowedToSupabase(itemRecord).catch(err => {
-      console.warn("[SUPABASE] Borrowed record save error:", err);
-    });
-
-    // Automatically increment taken count in Supabase inventory
-    adjustInventoryTakenInSupabase(itemRecord.itemName, 1).catch(err => {
-      console.warn("[SUPABASE] Inventory taken increment error:", err);
-    });
 
     res.json({ success: true, item: itemRecord });
   });
 
-  // PATCH return borrowed item (when staff collects it back from room)
-  app.patch("/api/borrowed/:id", async (req, res) => {
+  // Return borrowed item (when staff collects it back from room)
+  const handleReturnBorrowed = (req: express.Request, res: express.Response) => {
     const { id } = req.params;
     const found = serverBorrowed.find(b => b.id === id);
-    let itemName = req.body?.itemName;
     if (found) {
       found.status = "returned";
       found.returnedAt = Date.now();
-      if (!itemName) itemName = found.itemName;
     }
-    markBorrowedReturnedInSupabase(id).catch(err => {
-      console.warn("[SUPABASE] Borrowed return update error:", err);
-    });
-
-    // Automatically decrement taken count in Supabase inventory
-    if (itemName) {
-      adjustInventoryTakenInSupabase(itemName, -1).catch(err => {
-        console.warn("[SUPABASE] Inventory taken decrement error:", err);
-      });
-    }
-
     res.json({ success: true, message: "Item marked as returned" });
-  });
+  };
+  app.patch("/api/borrowed/:id", handleReturnBorrowed);
+  app.put("/api/borrowed/:id", handleReturnBorrowed);
+  app.post("/api/borrowed/:id/return", handleReturnBorrowed);
 
   // ============================================
-  // SUPABASE INVENTORY TRACKER ENDPOINTS
+  // INTERNAL INVENTORY TRACKER ENDPOINTS
   // ============================================
 
-  // GET all inventory items (live count: total, taken, available)
-  app.get("/api/inventory", async (req, res) => {
-    try {
-      const items = await fetchInventoryFromSupabase();
-      if (items && items.length > 0) {
-        return res.json({ success: true, inventory: items, source: "supabase" });
-      }
-    } catch (e: any) {
-      console.warn("[INVENTORY] Supabase fetch error:", e?.message);
-    }
-
-    // Fallback if Supabase table not created yet or empty
-    return res.json({
-      success: true,
-      inventory: [
-        { id: "inv-iron-box", name: "Iron Box", category: "Item", totalStock: 5, taken: 0, available: 5 },
-        { id: "inv-kettle", name: "Kettle", category: "Item", totalStock: 5, taken: 0, available: 5 },
-        { id: "inv-hair-dryer", name: "Hair Dryer", category: "Item", totalStock: 2, taken: 0, available: 2 },
-        { id: "inv-laptop-table", name: "Laptop Table", category: "Item", totalStock: 2, taken: 0, available: 2 },
-        { id: "inv-leg-massager", name: "Leg Massager (Paid)", category: "Item", totalStock: 1, taken: 0, available: 1 },
-        { id: "inv-glasses", name: "Water Glasses", category: "Item", totalStock: 10, taken: 0, available: 10 },
-        { id: "inv-usb-2", name: "USB 2.0 Adaptor + Cable", category: "Item", totalStock: 2, taken: 0, available: 2 },
-        { id: "inv-usb-3", name: "USB 3.0 Adaptor + Cable", category: "Item", totalStock: 2, taken: 0, available: 2 }
-      ],
-      source: "fallback"
+  // GET all inventory items (live count: totalStock, taken, available)
+  app.get("/api/inventory", (req, res) => {
+    const items = Object.entries(serverInventoryLimits).map(([name, limit]) => {
+      const taken = calculateItemTaken(name);
+      return {
+        id: `inv-${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+        name,
+        category: "Item",
+        totalStock: limit,
+        limit,
+        taken,
+        inUse: taken,
+        available: Math.max(0, limit - taken)
+      };
     });
+    return res.json({ success: true, inventory: items, source: "memory" });
   });
 
   // GET all rooms
@@ -321,56 +336,85 @@ async function startServer() {
     res.json({ success: true, message: `Room ${cleanNum} deleted`, rooms: serverRooms });
   });
 
-  // POST or upsert new inventory item (allowing owner to add new item rows)
-  app.post("/api/inventory", async (req, res) => {
-    const { name, totalStock, category, taken, id } = req.body;
+  // POST or upsert new inventory item
+  app.post("/api/inventory", (req, res) => {
+    const { name, totalStock } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, error: "Item name is required" });
     }
 
+    const clean = name.trim();
     const stockNum = Math.max(1, parseInt(totalStock, 10) || 1);
-    const result = await upsertInventoryInSupabase({
-      name: name.trim(),
-      totalStock: stockNum,
-      category: category === "Service" ? "Service" : "Item",
-      taken: typeof taken === "number" ? taken : 0,
-      id
-    });
+    serverInventoryLimits[clean] = stockNum;
 
-    if (result.success) {
-      return res.json({ success: true, item: result.data });
-    }
-    return res.status(500).json({ success: false, error: result.error });
+    return res.json({
+      success: true,
+      item: {
+        id: `inv-${clean.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+        name: clean,
+        totalStock: stockNum,
+        limit: stockNum,
+        taken: calculateItemTaken(clean),
+        inUse: calculateItemTaken(clean),
+        available: Math.max(0, stockNum - calculateItemTaken(clean))
+      }
+    });
   });
 
-  // PATCH adjust inventory item (e.g. change totalStock or taken)
-  app.patch("/api/inventory/:name", async (req, res) => {
+  // PATCH adjust inventory item (e.g. change totalStock)
+  app.patch("/api/inventory/:name", (req, res) => {
     const { name } = req.params;
-    const { totalStock, deltaTaken, taken } = req.body;
+    const decodedName = decodeURIComponent(name);
+    const { totalStock, limit } = req.body;
+    const stockNum = Math.max(1, parseInt(totalStock || limit, 10) || 1);
+    serverInventoryLimits[decodedName] = stockNum;
 
-    if (typeof deltaTaken === "number") {
-      const adjRes = await adjustInventoryTakenInSupabase(name, deltaTaken);
-      return res.json(adjRes);
-    }
-
-    const stockNum = Math.max(1, parseInt(totalStock, 10) || 1);
-    const result = await upsertInventoryInSupabase({
-      name: decodeURIComponent(name),
+    return res.json({
+      success: true,
+      name: decodedName,
       totalStock: stockNum,
-      taken: typeof taken === "number" ? taken : undefined
+      limit: stockNum,
+      taken: calculateItemTaken(decodedName),
+      inUse: calculateItemTaken(decodedName),
+      available: Math.max(0, stockNum - calculateItemTaken(decodedName))
     });
-
-    return res.json(result);
   });
 
-  // PATCH update request status
-  app.patch("/api/requests/:id", async (req, res) => {
+  // PATCH or PUT update request status
+  const handleUpdateStatus = async (req: express.Request, res: express.Response) => {
     const { id } = req.params;
     const { status } = req.body;
     const found = serverRequests.find(r => r.id === id);
     if (found && (status === "pending" || status === "completed")) {
       found.status = status;
-      // Sync update to Supabase
+
+      // When marked completed, automatically ensure returnable appliances are added to serverBorrowed without duplication
+      if (status === "completed" && Array.isArray(found.items)) {
+        for (const rawItem of found.items) {
+          const itemStr = String(rawItem);
+          if (isReturnableItem(itemStr)) {
+            const baseName = extractBaseApplianceName(itemStr);
+            const already = serverBorrowed.some(
+              b => (b.requestId && found.id && b.requestId === found.id && extractBaseApplianceName(b.itemName) === baseName) ||
+                   (b.roomId.trim().toLowerCase() === found.roomId.trim().toLowerCase() &&
+                    extractBaseApplianceName(b.itemName) === baseName &&
+                    b.status === "borrowed")
+            );
+            if (!already) {
+              serverBorrowed.unshift({
+                id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+                roomId: found.roomId,
+                itemName: itemStr,
+                status: "borrowed",
+                createdAt: Date.now(),
+                requestId: found.id
+              });
+            }
+          }
+        }
+      }
+
+      // Sync update to Supabase guest_requests
       updateRequestStatusInSupabase(id, status).catch(e => {
         console.warn("[SUPABASE] Status update error:", e);
       });
@@ -386,20 +430,9 @@ async function startServer() {
     }
 
     res.status(404).json({ success: false, message: "Request not found or invalid status" });
-  });
-
-  // DELETE request (removes from active staff dashboard, but PRESERVES permanently in Supabase)
-  app.delete("/api/requests/:id", async (req, res) => {
-    const { id } = req.params;
-    const idx = serverRequests.findIndex(r => r.id === id);
-    if (idx !== -1) {
-      serverRequests.splice(idx, 1);
-    }
-    // IMPORTANT: Per hotel requirements, deleting from the staff dashboard must NOT delete
-    // the request from the Supabase database. It remains preserved permanently in Supabase table guest_requests.
-    console.log(`[STAFF DASHBOARD] Request ${id} dismissed from dashboard view; preserved in Supabase.`);
-    return res.json({ success: true, message: "Request removed from dashboard view and preserved in Supabase" });
-  });
+  };
+  app.patch("/api/requests/:id", handleUpdateStatus);
+  app.put("/api/requests/:id", handleUpdateStatus);
 
   // Check Supabase connection and table status
   app.get("/api/supabase/status", async (req, res) => {

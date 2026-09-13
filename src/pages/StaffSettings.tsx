@@ -7,9 +7,7 @@ import {
   CheckCircle2, 
   Package, 
   RefreshCw,
-  Plus,
-  Mail,
-  Send
+  Plus
 } from "lucide-react";
 import toast, { Toaster } from "react-hot-toast";
 import { useOutletContext } from "react-router-dom";
@@ -52,8 +50,6 @@ export default function StaffSettings() {
   const [newItemName, setNewItemName] = useState("");
   const [newItemLimit, setNewItemLimit] = useState("5");
   const [isAddingItem, setIsAddingItem] = useState(false);
-  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
-  const [emailStatus, setEmailStatus] = useState<{ configured: boolean; recipients: string[]; from: string } | null>(null);
 
   // Background fetch from Supabase inventory API and Firestore
   useEffect(() => {
@@ -132,15 +128,6 @@ export default function StaffSettings() {
               return next;
             });
           }
-
-          // 4. Fetch email status
-          try {
-            const emailRes = await fetch("/api/email/status");
-            if (emailRes.ok && isMounted) {
-              const data = await emailRes.json();
-              setEmailStatus(data);
-            }
-          } catch (e) {}
         })();
 
         await Promise.race([loadTask, timeoutPromise]);
@@ -259,23 +246,6 @@ export default function StaffSettings() {
     setIsAddingItem(false);
   };
 
-  const handleSendTestEmail = async () => {
-    setIsSendingTestEmail(true);
-    try {
-      const res = await fetch("/api/email/test", { method: "POST" });
-      const data = await res.json();
-      if (data.success) {
-        toast.success("Test email dispatched successfully!");
-      } else {
-        toast.error(`Email dispatch note: ${data.error || "Check Resend credentials"}`);
-      }
-    } catch (e: any) {
-      toast.error("Failed to reach email server");
-    } finally {
-      setIsSendingTestEmail(false);
-    }
-  };
-
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -330,7 +300,7 @@ export default function StaffSettings() {
         localStorage.setItem("hues_stay_superhost_pin", superhostPin.trim());
       }
 
-      toast.success("Settings & Supabase Inventory saved!");
+      toast.success("Settings & Inventory saved!");
     } catch (error: any) {
       console.error("Error saving settings:", error?.message || "error");
       if (superhostPin.trim()) {
@@ -430,11 +400,11 @@ export default function StaffSettings() {
                 <h3 className="font-serif text-xl mb-1 flex items-center gap-2">
                   <span>Inventory Stock Limits</span>
                   <span className="text-[10px] uppercase tracking-widest px-2 py-0.5 bg-neutral-100 text-[#8C857D] font-mono border border-neutral-200">
-                    Supabase Live Tracked
+                    Live Stock
                   </span>
                 </h3>
                 <p className="text-[#8C857D] text-sm">
-                  Set the total stock for each item. Remaining available count is automatically computed in Supabase.
+                  Set the total stock for each item. Available count updates automatically as items are requested and returned.
                 </p>
               </div>
 
@@ -526,43 +496,6 @@ export default function StaffSettings() {
                   </div>
                 );
               })}
-            </div>
-
-            {/* Email Notification Alerts */}
-            <div className="mt-8 pt-6 border-t border-[#E5E1DB]">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2">
-                <div>
-                  <h4 className="font-serif text-lg text-[#2D2926] flex items-center gap-2">
-                    <Mail className="w-5 h-5 text-[#A68966]" />
-                    <span>Email Notification Alerts</span>
-                  </h4>
-                  <p className="text-[#8C857D] text-xs mt-0.5">
-                    Live alerts sent whenever a guest submits a new amenity or service request.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleSendTestEmail}
-                  disabled={isSendingTestEmail}
-                  className="px-4 py-2 bg-[#2D2926] text-white text-xs uppercase tracking-wider flex items-center gap-1.5 hover:bg-black transition-colors disabled:opacity-50 cursor-pointer self-start sm:self-auto"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  {isSendingTestEmail ? "Sending..." : "Send Test Email"}
-                </button>
-              </div>
-
-              <div className="p-3.5 bg-[#FAF9F7] border border-[#E5E1DB] text-xs space-y-1.5 mt-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-[#8C857D]">Active Recipients:</span>
-                  <span className="font-mono text-[#2D2926] font-medium">
-                    {emailStatus?.recipients?.length ? emailStatus.recipients.join(", ") : "alamuri.kishan@gmail.com"}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#8C857D]">Dispatcher Service:</span>
-                  <span className="text-[#2D2926] font-medium">Resend Email API</span>
-                </div>
-              </div>
             </div>
 
             {/* Superhost PIN Change */}

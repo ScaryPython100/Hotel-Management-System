@@ -2,10 +2,10 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { collection, addDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { COMMON_ITEMS, DEFAULT_ROOMS, Room } from "../types";
+import { COMMON_ITEMS, DEFAULT_ROOMS, Room, getItemUnitConsumption } from "../types";
 import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
-import { Check, Loader2, Info, ArrowRight, BedDouble, Minus, Plus } from "lucide-react";
+import { Check, Loader2, Info, ArrowRight, BedDouble, Trash2 } from "lucide-react";
 
 // Fast local resolver: resolves in 0 milliseconds
 function resolveRoomInstantly(hash?: string): string | null {
@@ -50,10 +50,16 @@ export default function GuestView() {
   const [isValidating, setIsValidating] = useState(!initialRoom);
   
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
-  const [itemQuantities, setItemQuantities] = useState<Record<string, number>>({});
   const [customMessage, setCustomMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+  const [lastSubmittedId, setLastSubmittedId] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem("hues_last_req_id") || null;
+    } catch {
+      return null;
+    }
+  });
 
   // Cached inventory with default stock values (0ms render time)
   const [inventory, setInventory] = useState<Record<string, { inUse: number, limit: number }>>(() => {
@@ -138,13 +144,18 @@ export default function GuestView() {
     };
   }, [hash, roomNumber]);
 
-  // Helper to resolve inventory data supporting aliases like "Water Glasses" and "Glasses"
+  // Helper to resolve inventory data supporting aliases like "Glasses (Set of 2)" and "Teakettle"
   const getInventoryData = (name: string) => {
     if (inventory[name]) return inventory[name];
-    const lower = name.toLowerCase();
+    const lower = name.toLowerCase().trim();
     if (lower.includes("glass")) {
-      return inventory["Water Glasses"] || inventory["Glasses"];
+      return inventory["Glasses (Set of 2)"] || inventory["Glasses"] || inventory["Water Glasses"];
     }
+    if (lower.includes("kettle") || lower.includes("teakettle")) {
+      return inventory["Teakettle"] || inventory["Kettle"];
+    }
+    const foundKey = Object.keys(inventory).find(k => k.toLowerCase().trim() === lower);
+    if (foundKey) return inventory[foundKey];
     return undefined;
   };
 
@@ -152,8 +163,8 @@ export default function GuestView() {
   useEffect(() => {
     let isMounted = true;
 
-    // Fetch live inventory from Supabase / API
-    const fetchSupabaseInventory = async () => {
+    // Fetch live inventory from API
+    const fetchLiveInventory = async () => {
       try {
         const res = await fetch("/api/inventory");
         if (res.ok) {
@@ -162,15 +173,16 @@ export default function GuestView() {
             const invMap: Record<string, { inUse: number, limit: number }> = {};
             data.inventory.forEach((item: any) => {
               const itemData = {
-                inUse: item.taken || 0,
-                limit: item.totalStock || item.limit || 1
+                inUse: item.taken ?? item.inUse ?? 0,
+                limit: item.totalStock ?? item.limit ?? 1
               };
               invMap[item.name] = itemData;
-              // Alias Glasses and Water Glasses so both always have identical stock numbers
-              if (item.name === "Water Glasses") {
+              if (item.name.toLowerCase().includes("glass")) {
+                invMap["Glasses (Set of 2)"] = itemData;
                 invMap["Glasses"] = itemData;
-              } else if (item.name === "Glasses") {
-                invMap["Water Glasses"] = itemData;
+              } else if (item.name.toLowerCase().includes("kettle") || item.name.toLowerCase().includes("teakettle")) {
+                invMap["Teakettle"] = itemData;
+                invMap["Kettle"] = itemData;
               }
             });
             setInventory(prev => ({ ...prev, ...invMap }));
@@ -180,16 +192,16 @@ export default function GuestView() {
           }
         }
       } catch (err) {
-        console.warn("Supabase inventory fetch note:", err);
+        console.warn("Inventory fetch note:", err);
       }
     };
 
-    fetchSupabaseInventory();
-    const interval = setInterval(fetchSupabaseInventory, 4000);
+    fetchLiveInventory();
+    const interval = setInterval(fetchLiveInventory, 3000);
 
-    const onFocus = () => fetchSupabaseInventory();
+    const onFocus = () => fetchLiveInventory();
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") fetchSupabaseInventory();
+      if (document.visibilityState === "visible") fetchLiveInventory();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -200,10 +212,12 @@ export default function GuestView() {
         const data = docSnap.data();
         const itemData = { inUse: data.inUse || 0, limit: data.limit || 1 };
         invMap[data.name] = itemData;
-        if (data.name === "Water Glasses") {
+        if (data.name.toLowerCase().includes("glass")) {
+          invMap["Glasses (Set of 2)"] = itemData;
           invMap["Glasses"] = itemData;
-        } else if (data.name === "Glasses") {
-          invMap["Water Glasses"] = itemData;
+        } else if (data.name.toLowerCase().includes("kettle") || data.name.toLowerCase().includes("teakettle")) {
+          invMap["Teakettle"] = itemData;
+          invMap["Kettle"] = itemData;
         }
       });
       setInventory(prev => ({ ...prev, ...invMap }));
@@ -211,7 +225,7 @@ export default function GuestView() {
         localStorage.setItem("hues_stay_inventory", JSON.stringify(invMap));
       } catch (e) {}
     }, (error) => {
-      console.warn("Real-time inventory listener error (offline cache active):", error?.message || "offline");
+      console.warn("Real-time inventory listener error:", error?.message || "offline");
     });
 
     const unsubscribeAmenities = onSnapshot(doc(db, "settings", "amenities"), (docSnap) => {
@@ -223,7 +237,7 @@ export default function GuestView() {
         } catch (e) {}
       }
     }, (error) => {
-      console.warn("Real-time amenities listener error (offline cache active):", error?.message || "offline");
+      console.warn("Real-time amenities listener error:", error?.message || "offline");
     });
 
     return () => {
@@ -241,15 +255,17 @@ export default function GuestView() {
     setSelectedItems(prev => {
       const unavailableSelected = prev.filter(item => {
         const inv = getInventoryData(item);
+        const neededUnits = getItemUnitConsumption(item);
+        const availableUnits = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
         const isLimited = COMMON_ITEMS.find(i => i.name === item)?.isLimited ?? (inv !== undefined);
-        const isOutOfStock = isLimited && inv && inv.inUse >= inv.limit;
+        const isOutOfStock = isLimited && inv && (availableUnits < neededUnits);
         const isOutOfService = amenitiesStatus[item] === 'out_of_service';
         return isOutOfStock || isOutOfService;
       });
 
       if (unavailableSelected.length > 0) {
         unavailableSelected.forEach(item => {
-          toast.error(`${item} is currently unavailable (all in use) and was deselected.`, {
+          toast.error(`${item} is currently unavailable and was deselected.`, {
             id: `unavail-${item}`,
             duration: 4000
           });
@@ -260,40 +276,10 @@ export default function GuestView() {
     });
   }, [inventory, amenitiesStatus]);
 
-  const updateQuantity = (item: string, newQty: number, maxAvailable: number) => {
-    if (newQty <= 0) {
-      setSelectedItems((prev) => prev.filter((i) => i !== item));
-      setItemQuantities((prev) => {
-        const next = { ...prev };
-        delete next[item];
-        return next;
-      });
-      return;
-    }
-    const clamped = Math.min(newQty, maxAvailable);
-    setItemQuantities((prev) => ({
-      ...prev,
-      [item]: clamped,
-    }));
-  };
-
   const toggleItem = (item: string) => {
-    setSelectedItems((prev) => {
-      if (prev.includes(item)) {
-        setItemQuantities((q) => {
-          const next = { ...q };
-          delete next[item];
-          return next;
-        });
-        return prev.filter((i) => i !== item);
-      } else {
-        setItemQuantities((q) => ({
-          ...q,
-          [item]: 1,
-        }));
-        return [...prev, item];
-      }
-    });
+    setSelectedItems((prev) =>
+      prev.includes(item) ? prev.filter((i) => i !== item) : [...prev, item]
+    );
   };
 
   const handleManualRoomSelect = (num: string) => {
@@ -319,36 +305,28 @@ export default function GuestView() {
       const limitedItemsRequested = selectedItems.filter(item => {
         const staticItem = COMMON_ITEMS.find(i => i.name === item);
         if (staticItem) return staticItem.isLimited;
-        // Any custom inventory item is tracked and limited
         return inventory[item] !== undefined;
       });
 
-      // Verify stock and requested quantities for limited items before proceeding
+      // Verify stock for limited items using internal unit consumption before proceeding
       for (const item of limitedItemsRequested) {
         const inv = getInventoryData(item);
-        const requestedQty = itemQuantities[item] || 1;
+        const neededUnits = getItemUnitConsumption(item);
         if (inv) {
           const available = Math.max(0, inv.limit - inv.inUse);
-          if (available <= 0) {
-            toast.error(`${item} is currently unavailable (all ${inv.limit} units are in use). Please remove it.`);
-            setIsSubmitting(false);
-            return;
-          }
-          if (requestedQty > available) {
-            toast.error(`Only ${available} unit(s) of ${item} available right now. Please adjust requested quantity to ${available}.`);
+          if (available < neededUnits) {
+            toast.error(`${item} is currently unavailable. Please remove it from your selection.`);
             setIsSubmitting(false);
             return;
           }
         }
       }
 
-      // Format items with requested quantity (e.g., "Water Glasses (Qty: 2)", "Soap Refill")
-      const finalItems = selectedItems.map((item) => {
-        const qty = itemQuantities[item] || 1;
-        return qty > 1 ? `${item} (Qty: ${qty})` : item;
-      });
+      const finalItems = [...selectedItems];
+      const reqId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
       const requestData = {
+        id: reqId,
         roomId: roomNumber,
         qrCodeHash: hash || roomNumber,
         items: finalItems,
@@ -357,10 +335,15 @@ export default function GuestView() {
         createdAt: Date.now(),
       };
 
+      setLastSubmittedId(reqId);
+      try {
+        sessionStorage.setItem("hues_last_req_id", reqId);
+      } catch (e) {}
+
       // 1. Instantly save to local storage cache so it appears on staff dashboard in 0ms
       try {
         const cached = JSON.parse(localStorage.getItem("hues_stay_requests") || "[]");
-        cached.unshift({ id: `local-req-${Date.now()}`, ...requestData });
+        cached.unshift(requestData);
         localStorage.setItem("hues_stay_requests", JSON.stringify(cached));
       } catch (e) {}
 
@@ -400,11 +383,38 @@ export default function GuestView() {
       toast.success("Request sent to front desk!");
     } catch (error) {
       console.error("Error submitting request:", error);
-      // Even on error, show success if local copy was recorded
       setIsSuccess(true);
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleCancelRequest = async () => {
+    if (!lastSubmittedId) {
+      setIsSuccess(false);
+      return;
+    }
+    if (!window.confirm("Are you sure you want to cancel and remove this request?")) return;
+    
+    try {
+      await fetch(`/api/requests/${lastSubmittedId}`, { method: 'DELETE' });
+    } catch (e) {}
+
+    try {
+      const cached = JSON.parse(localStorage.getItem("hues_stay_requests") || "[]");
+      const next = cached.filter((r: any) => r.id !== lastSubmittedId);
+      localStorage.setItem("hues_stay_requests", JSON.stringify(next));
+    } catch (e) {}
+
+    try {
+      sessionStorage.removeItem("hues_last_req_id");
+    } catch (e) {}
+
+    setLastSubmittedId(null);
+    setIsSuccess(false);
+    setSelectedItems([]);
+    setCustomMessage("");
+    toast.success("Your request was cancelled and removed from the active queue.");
   };
 
   // Brief spinner only if validating for first few hundred ms
@@ -489,37 +499,43 @@ export default function GuestView() {
               Requested Items
             </span>
             <ul className="space-y-1.5 text-sm text-[#2D2926]">
-              {selectedItems.map(item => {
-                const qty = itemQuantities[item] || 1;
-                return (
-                  <li key={item} className="flex justify-between items-center py-1 border-b border-[#F2EFE9] last:border-0">
-                    <span className="font-serif">{item}</span>
-                    <span className="font-mono text-xs font-bold text-[#A68966] bg-[#FAF8F5] px-2 py-0.5 border border-[#EBE7E1] rounded-xs">
-                      Qty: {qty}
-                    </span>
-                  </li>
-                );
-              })}
+              {selectedItems.map(item => (
+                <li key={item} className="flex justify-between items-center py-1 border-b border-[#F2EFE9] last:border-0">
+                  <span className="font-serif">{item}</span>
+                  <span className="font-mono text-xs text-[#A68966] bg-[#FAF8F5] px-2 py-0.5 border border-[#EBE7E1] rounded-xs">
+                    Requested
+                  </span>
+                </li>
+              ))}
             </ul>
           </div>
         )}
 
-        <button
-          onClick={() => {
-            setIsSuccess(false);
-            setSelectedItems([]);
-            setItemQuantities({});
-            setCustomMessage("");
-          }}
-          className="px-8 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors rounded-none cursor-pointer"
-        >
-          Make Another Request
-        </button>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <button
+            onClick={() => {
+              setIsSuccess(false);
+              setSelectedItems([]);
+              setCustomMessage("");
+            }}
+            className="px-8 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors rounded-none cursor-pointer"
+          >
+            Make Another Request
+          </button>
+          <button
+            type="button"
+            onClick={handleCancelRequest}
+            className="px-6 py-4 bg-white text-red-700 border border-red-200 font-medium uppercase tracking-[0.2em] text-xs hover:bg-red-50 transition-colors flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-red-500" />
+            Cancel / Remove Request
+          </button>
+        </div>
       </div>
     );
   }
 
-  const totalRequestedCount = selectedItems.reduce((acc, item) => acc + (itemQuantities[item] || 1), 0);
+  const totalRequestedCount = selectedItems.length;
 
   return (
     <div className="min-h-screen bg-[#F9F7F4] text-[#2D2926] pb-20 font-sans">
@@ -549,16 +565,19 @@ export default function GuestView() {
                 const isSelected = selectedItems.includes(item);
                 const isOutOfService = amenitiesStatus[item] === 'out_of_service';
                 const isDisabled = isOutOfService;
-                const currentQty = itemQuantities[item] || 1;
 
                 return (
                   <div
                     key={item}
                     onClick={() => {
-                      if (!isDisabled) toggleItem(item);
+                      if (!isDisabled) {
+                        toggleItem(item);
+                      } else {
+                        toast.error(`${item} is currently out of service.`);
+                      }
                     }}
                     className={cn(
-                      "bg-white border p-5 flex flex-col justify-between text-left transition-all duration-200 min-h-[120px] h-auto rounded-none relative gap-3 select-none",
+                      "bg-white border p-5 flex flex-col justify-between text-left transition-all duration-200 min-h-[90px] h-auto rounded-none relative gap-3 select-none",
                       isSelected
                         ? "bg-[#F2EFE9] border-[#A68966] text-[#2D2926] shadow-xs"
                         : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]",
@@ -578,51 +597,8 @@ export default function GuestView() {
                       </div>
                     </div>
 
-                    {isSelected && (
-                      <div 
-                        className="flex items-center justify-between w-full pt-2.5 mt-auto border-t border-[#E0DBD3]"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <span className="text-[11px] uppercase tracking-wider text-[#736B63] font-medium">
-                          Quantity:
-                        </span>
-                        <div className="flex items-center gap-1 bg-white px-1.5 py-0.5 border border-[#D5D1CB] rounded-xs shadow-2xs">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              updateQuantity(item, currentQty - 1, 10);
-                            }}
-                            className="w-6 h-6 flex items-center justify-center text-[#2D2926] hover:bg-[#F2EFE9] transition-colors rounded-xs cursor-pointer"
-                            aria-label="Decrease quantity"
-                          >
-                            <Minus className="w-3 h-3" />
-                          </button>
-                          <span className="w-6 text-center font-mono font-bold text-xs text-[#2D2926]">
-                            {currentQty}
-                          </span>
-                          <button
-                            type="button"
-                            disabled={currentQty >= 10}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (currentQty >= 10) {
-                                toast.error("Maximum 10 units per request.");
-                                return;
-                              }
-                              updateQuantity(item, currentQty + 1, 10);
-                            }}
-                            className="w-6 h-6 flex items-center justify-center text-[#2D2926] hover:bg-[#F2EFE9] transition-colors rounded-xs disabled:opacity-30 cursor-pointer"
-                            aria-label="Increase quantity"
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
                     {isOutOfService && (
-                      <span className="text-[10px] text-red-500 uppercase tracking-widest font-bold mt-1">
+                      <span className="text-[10px] text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 uppercase tracking-wider font-semibold rounded-sm inline-block w-fit">
                         Unavailable
                       </span>
                     )}
@@ -638,7 +614,6 @@ export default function GuestView() {
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
               {(() => {
-                // Combine default items with any custom items synced from Supabase/Owner
                 const itemsList: Array<{ name: string; isLimited: boolean }> = [
                   ...COMMON_ITEMS.filter(i => i.category === 'Item').map(i => ({ name: i.name, isLimited: !!i.isLimited }))
                 ];
@@ -652,28 +627,24 @@ export default function GuestView() {
                   const item = itemObj.name;
                   const isSelected = selectedItems.includes(item);
                   const inv = getInventoryData(item);
-                  const isOutOfStock = (itemObj.isLimited || inv !== undefined) && inv && inv.inUse >= inv.limit;
+                  const neededUnits = getItemUnitConsumption(item);
+                  const availableUnits = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
+                  const isOutOfStock = (itemObj.isLimited || inv !== undefined) && inv && (availableUnits < neededUnits);
                   const isOutOfService = amenitiesStatus[item] === 'out_of_service';
                   const isDisabled = isOutOfStock || isOutOfService;
-                  const availableCount = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
-                  const currentQty = itemQuantities[item] || 1;
 
                   return (
                     <div
                       key={item}
                       onClick={() => {
                         if (isDisabled) {
-                          if (isOutOfService) {
-                            toast.error(`${item} is currently out of service.`);
-                          } else if (isOutOfStock) {
-                            toast.error(`${item} is currently unavailable (all ${inv?.limit || 10} units are in use).`);
-                          }
+                          toast.error(`${item} is currently unavailable.`);
                           return;
                         }
                         toggleItem(item);
                       }}
                       className={cn(
-                        "bg-white border p-5 flex flex-col justify-between text-left transition-all duration-200 min-h-[120px] h-auto rounded-none relative gap-3 select-none",
+                        "bg-white border p-5 flex flex-col justify-between text-left transition-all duration-200 min-h-[90px] h-auto rounded-none relative gap-3 select-none",
                         isSelected
                           ? "bg-[#F2EFE9] border-[#A68966] text-[#2D2926] shadow-xs"
                           : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]",
@@ -683,14 +654,7 @@ export default function GuestView() {
                       )}
                     >
                       <div className="flex justify-between items-start w-full gap-2">
-                        <div>
-                          <span className="font-serif text-base md:text-lg leading-tight block">{item}</span>
-                          {inv && !isDisabled && (
-                            <span className="text-[10px] text-[#8C857D] font-mono tracking-wider block mt-1">
-                              {availableCount} of {inv.limit} available
-                            </span>
-                          )}
-                        </div>
+                        <span className="font-serif text-base md:text-lg leading-tight block">{item}</span>
                         <div
                           className={cn(
                             "w-5 h-5 flex items-center justify-center shrink-0 border rounded-xs mt-0.5 transition-colors",
@@ -702,58 +666,11 @@ export default function GuestView() {
                         </div>
                       </div>
 
-                      {isSelected && !isDisabled && (
-                        <div 
-                          className="flex items-center justify-between w-full pt-2.5 mt-auto border-t border-[#E0DBD3]"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <span className="text-[11px] uppercase tracking-wider text-[#736B63] font-medium">
-                            Quantity:
-                          </span>
-                          <div className="flex items-center gap-1 bg-white px-1.5 py-0.5 border border-[#D5D1CB] rounded-xs shadow-2xs">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                updateQuantity(item, currentQty - 1, availableCount);
-                              }}
-                              className="w-6 h-6 flex items-center justify-center text-[#2D2926] hover:bg-[#F2EFE9] transition-colors rounded-xs cursor-pointer"
-                              aria-label="Decrease quantity"
-                            >
-                              <Minus className="w-3 h-3" />
-                            </button>
-                            <span className="w-6 text-center font-mono font-bold text-xs text-[#2D2926]">
-                              {currentQty}
-                            </span>
-                            <button
-                              type="button"
-                              disabled={currentQty >= availableCount}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (currentQty >= availableCount) {
-                                  toast.error(`Only ${availableCount} unit(s) of ${item} available.`);
-                                  return;
-                                }
-                                updateQuantity(item, currentQty + 1, availableCount);
-                              }}
-                              className="w-6 h-6 flex items-center justify-center text-[#2D2926] hover:bg-[#F2EFE9] transition-colors rounded-xs disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
-                              aria-label="Increase quantity"
-                            >
-                              <Plus className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {isOutOfService ? (
+                      {isDisabled && (
                         <span className="text-[10px] text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 uppercase tracking-wider font-semibold rounded-sm inline-block w-fit">
                           Unavailable
                         </span>
-                      ) : isOutOfStock ? (
-                        <span className="text-[10px] text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 uppercase tracking-wider font-semibold rounded-sm inline-block w-fit">
-                          Unavailable (All {inv?.limit || 10} In Use)
-                        </span>
-                      ) : null}
+                      )}
                     </div>
                   );
                 });
