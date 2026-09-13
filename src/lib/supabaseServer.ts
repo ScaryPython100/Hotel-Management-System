@@ -198,16 +198,10 @@ export async function fetchRequestsFromSupabase(includeDeleted = false): Promise
   if (!supabase) return null;
 
   try {
-    let query = supabase
+    const { data, error } = await supabase
       .from(SUPABASE_TABLE_NAME)
       .select("*")
       .order("created_at", { ascending: false });
-
-    if (!includeDeleted) {
-      query = query.or("is_deleted_from_dashboard.is.null,is_deleted_from_dashboard.eq.false");
-    }
-
-    const { data, error } = await query;
 
     if (error) {
       console.warn("[SUPABASE] Query error:", error.message);
@@ -216,7 +210,9 @@ export async function fetchRequestsFromSupabase(includeDeleted = false): Promise
 
     if (!data) return [];
 
-    return data.map((row: any) => ({
+    const activeRows = includeDeleted ? data : data.filter((row: any) => !row.is_deleted_from_dashboard);
+
+    const mapped: RequestRecord[] = activeRows.map((row: any) => ({
       id: row.id,
       roomId: row.room_id,
       items: Array.isArray(row.items) ? row.items : [],
@@ -224,6 +220,35 @@ export async function fetchRequestsFromSupabase(includeDeleted = false): Promise
       status: row.status === "completed" ? "completed" : "pending",
       createdAt: Number(row.created_at) || Date.now(),
     }));
+
+    // Deduplicate any accidental duplicate records within a 3-minute window
+    const result: RequestRecord[] = [];
+    const seenIds = new Set<string>();
+
+    for (const r of mapped) {
+      if (!r || !r.roomId) continue;
+      if (r.id && seenIds.has(r.id)) continue;
+
+      const rItemsStr = JSON.stringify((r.items || []).slice().sort().map(String));
+      const rMsg = (r.customMessage || "").trim().toLowerCase();
+      const rRoom = String(r.roomId).trim().toLowerCase();
+
+      const dup = result.some(ex => {
+        if (String(ex.roomId).trim().toLowerCase() !== rRoom) return false;
+        const exItems = JSON.stringify((ex.items || []).slice().sort().map(String));
+        if (exItems !== rItemsStr) return false;
+        if ((ex.customMessage || "").trim().toLowerCase() !== rMsg) return false;
+        const diff = Math.abs((ex.createdAt || 0) - (r.createdAt || 0));
+        return diff < 180000;
+      });
+
+      if (!dup) {
+        if (r.id) seenIds.add(r.id);
+        result.push(r);
+      }
+    }
+
+    return result;
   } catch (err: any) {
     console.warn("[SUPABASE] Exception fetching requests:", err?.message);
     return null;
@@ -356,6 +381,38 @@ export async function fetchBorrowedFromSupabase(): Promise<BorrowedRecord[] | nu
     }));
   } catch {
     return null;
+  }
+}
+
+export async function deleteBorrowedFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const { error } = await supabase
+      .from(SUPABASE_BORROWED_TABLE)
+      .delete()
+      .eq("id", id);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}
+
+export async function deleteBorrowedByRequestIdFromSupabase(requestId: string): Promise<{ success: boolean; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    const { error } = await supabase
+      .from(SUPABASE_BORROWED_TABLE)
+      .delete()
+      .eq("id", requestId);
+    return { success: !error };
+  } catch {
+    return { success: true };
   }
 }
 

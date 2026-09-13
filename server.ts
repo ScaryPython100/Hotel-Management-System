@@ -10,10 +10,14 @@ import {
   fetchRequestsFromSupabase,
   getSupabaseStatus,
   BorrowedRecord,
+  saveBorrowedToSupabase,
+  markBorrowedReturnedInSupabase,
+  fetchBorrowedFromSupabase,
+  deleteBorrowedFromSupabase,
   SUPABASE_TABLE_SQL,
   SUPABASE_TABLE_NAME
 } from "./src/lib/supabaseServer";
-import { isReturnableItem, getItemUnitConsumption } from "./src/types";
+import { isReturnableItem, getItemUnitConsumption, normalizeReturnableName } from "./src/types";
 
 function extractBaseApplianceName(name: string): string {
   const clean = String(name || "").toLowerCase().trim();
@@ -129,6 +133,38 @@ const serverRooms: Array<{ id: string; roomNumber: string; qrCodeHash: string; s
 async function startServer() {
   app.use(express.json());
 
+function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
+  const result: ServerRequest[] = [];
+  const seenIds = new Set<string>();
+
+  for (const r of list) {
+    if (!r || !r.roomId) continue;
+    if (r.id && seenIds.has(r.id)) continue;
+
+    const rItems = (r.items || []).slice().sort().map(String);
+    const rItemsStr = JSON.stringify(rItems);
+    const rMsg = (r.customMessage || "").trim().toLowerCase();
+    const rRoom = String(r.roomId).trim().toLowerCase();
+
+    // Check if duplicate of an existing item in result within 3 minutes
+    const dup = result.some(ex => {
+      if (String(ex.roomId).trim().toLowerCase() !== rRoom) return false;
+      const exItems = (ex.items || []).slice().sort().map(String);
+      if (JSON.stringify(exItems) !== rItemsStr) return false;
+      if ((ex.customMessage || "").trim().toLowerCase() !== rMsg) return false;
+      const diff = Math.abs((ex.createdAt || 0) - (r.createdAt || 0));
+      return diff < 180000;
+    });
+
+    if (!dup) {
+      if (r.id) seenIds.add(r.id);
+      result.push(r);
+    }
+  }
+
+  return result;
+}
+
   // GET all requests (from Supabase if configured, falling back to memory)
   app.get("/api/requests", async (req, res) => {
     try {
@@ -136,20 +172,23 @@ async function startServer() {
       if (supabaseRequests && supabaseRequests.length > 0) {
         // Merge into serverRequests to maintain local hot cache while filtering dismissed items
         const mergedMap = new Map<string, ServerRequest>();
-        serverRequests.forEach(r => {
-          if (!serverDismissedRequests.has(r.id)) mergedMap.set(r.id, r);
-        });
         supabaseRequests.forEach(r => {
           if (!serverDismissedRequests.has(r.id)) mergedMap.set(r.id, r);
         });
+        // In-memory serverRequests holds the most immediate status transitions
+        serverRequests.forEach(r => {
+          if (!serverDismissedRequests.has(r.id)) mergedMap.set(r.id, r);
+        });
         const combined = Array.from(mergedMap.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-        return res.json({ success: true, requests: combined, source: "supabase" });
+        const deduplicated = deduplicateServerRequests(combined);
+        return res.json({ success: true, requests: deduplicated, source: "supabase" });
       }
     } catch (e: any) {
       console.warn("Could not retrieve requests from Supabase, using server cache:", e?.message);
     }
     const filteredMemory = serverRequests.filter(r => !serverDismissedRequests.has(r.id));
-    res.json({ success: true, requests: filteredMemory, source: "memory" });
+    const deduplicated = deduplicateServerRequests(filteredMemory);
+    res.json({ success: true, requests: deduplicated, source: "memory" });
   });
 
   // DELETE / dismiss request from active dashboard/screen views (STRICTLY PRESERVED in Supabase database)
@@ -180,15 +219,33 @@ async function startServer() {
       createdAt: createdAt || Date.now()
     };
 
-    // Avoid duplicate if same room and items within 10 seconds
-    const isDup = serverRequests.some(r => 
-      r.roomId === newReq.roomId && 
-      JSON.stringify(r.items) === JSON.stringify(newReq.items) &&
-      Math.abs(r.createdAt - newReq.createdAt) < 10000
-    );
-    if (!isDup) {
-      serverRequests.unshift(newReq);
+    // If serverRequests is empty (e.g. fresh reboot), populate from Supabase
+    if (serverRequests.length === 0) {
+      try {
+        const existingFromDb = await fetchRequestsFromSupabase();
+        if (existingFromDb && existingFromDb.length > 0) {
+          existingFromDb.forEach(r => {
+            if (!serverDismissedRequests.has(r.id)) serverRequests.push(r);
+          });
+        }
+      } catch (e) {}
     }
+
+    // Avoid duplicate if same room and items within 180 seconds or matching ID
+    const newItemsSorted = JSON.stringify(newReq.items.slice().sort().map(String));
+    const existingReq = serverRequests.find(r => 
+      (r.id && newReq.id && r.id === newReq.id) ||
+      (r.roomId.trim().toLowerCase() === newReq.roomId.trim().toLowerCase() && 
+       JSON.stringify((r.items || []).slice().sort().map(String)) === newItemsSorted &&
+       (r.customMessage || "").trim().toLowerCase() === (newReq.customMessage || "").trim().toLowerCase() &&
+       Math.abs(r.createdAt - newReq.createdAt) < 180000)
+    );
+
+    if (existingReq) {
+      return res.json({ success: true, request: existingReq, isDuplicate: true });
+    }
+
+    serverRequests.unshift(newReq);
 
     // Persist to Supabase asynchronously (strictly saved)
     saveRequestToSupabase(newReq).catch(err => {
@@ -205,8 +262,23 @@ async function startServer() {
     res.json({ success: true, request: newReq });
   });
 
-  // GET borrowed items (deduplicated by active room & appliance)
-  app.get("/api/borrowed", (req, res) => {
+  // GET borrowed items (deduplicated by active room & appliance, synchronized with Supabase)
+  app.get("/api/borrowed", async (req, res) => {
+    try {
+      const supaBorrowed = await fetchBorrowedFromSupabase();
+      if (supaBorrowed && Array.isArray(supaBorrowed)) {
+        const idMap = new Map<string, BorrowedRecord>();
+        // Supabase records
+        supaBorrowed.forEach(b => idMap.set(b.id, b));
+        // Server memory records (in-flight)
+        serverBorrowed.forEach(b => idMap.set(b.id, b));
+        serverBorrowed.length = 0;
+        serverBorrowed.push(...idMap.values());
+      }
+    } catch (e: any) {
+      console.warn("[SUPABASE] Fetch borrowed error:", e?.message || e);
+    }
+
     const dedupMap = new Map<string, BorrowedRecord>();
     serverBorrowed.forEach(b => {
       const baseName = extractBaseApplianceName(b.itemName);
@@ -220,16 +292,17 @@ async function startServer() {
     res.json({ success: true, items: Array.from(dedupMap.values()) });
   });
 
-  // POST newly borrowed item (when staff delivers item and marks request done)
-  app.post("/api/borrowed", (req, res) => {
+  // POST newly borrowed item (persists to Supabase and memory)
+  app.post("/api/borrowed", async (req, res) => {
     const { roomId, itemName, id: providedId, requestId } = req.body;
     if (!roomId || !itemName) {
       return res.status(400).json({ error: "Missing roomId or itemName" });
     }
+    const cleanItemName = normalizeReturnableName(String(itemName));
     const itemRecord: BorrowedRecord = {
       id: providedId || `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
       roomId: String(roomId),
-      itemName: String(itemName),
+      itemName: cleanItemName,
       status: "borrowed",
       createdAt: Date.now(),
       requestId: requestId ? String(requestId) : undefined
@@ -256,22 +329,38 @@ async function startServer() {
       };
     }
 
+    // Persist to Supabase
+    saveBorrowedToSupabase(itemRecord).catch(e => console.warn("[SUPABASE] Save borrowed:", e));
+
     res.json({ success: true, item: itemRecord });
   });
 
   // Return borrowed item (when staff collects it back from room)
-  const handleReturnBorrowed = (req: express.Request, res: express.Response) => {
+  const handleReturnBorrowed = async (req: express.Request, res: express.Response) => {
     const { id } = req.params;
     const found = serverBorrowed.find(b => b.id === id);
     if (found) {
       found.status = "returned";
       found.returnedAt = Date.now();
     }
+    // Update in Supabase
+    markBorrowedReturnedInSupabase(id).catch(e => console.warn("[SUPABASE] Mark returned error:", e));
     res.json({ success: true, message: "Item marked as returned" });
   };
   app.patch("/api/borrowed/:id", handleReturnBorrowed);
   app.put("/api/borrowed/:id", handleReturnBorrowed);
   app.post("/api/borrowed/:id/return", handleReturnBorrowed);
+
+  // DELETE borrowed item
+  app.delete("/api/borrowed/:id", async (req, res) => {
+    const { id } = req.params;
+    const idx = serverBorrowed.findIndex(b => b.id === id);
+    if (idx !== -1) {
+      serverBorrowed.splice(idx, 1);
+    }
+    deleteBorrowedFromSupabase(id).catch(e => console.warn("[SUPABASE] Delete borrowed error:", e));
+    res.json({ success: true, message: "Borrowed item removed" });
+  });
 
   // ============================================
   // INTERNAL INVENTORY TRACKER ENDPOINTS
@@ -384,52 +473,83 @@ async function startServer() {
   const handleUpdateStatus = async (req: express.Request, res: express.Response) => {
     const { id } = req.params;
     const { status } = req.body;
-    const found = serverRequests.find(r => r.id === id);
-    if (found && (status === "pending" || status === "completed")) {
-      found.status = status;
+    if (status !== "pending" && status !== "completed") {
+      return res.status(400).json({ success: false, message: "Invalid status" });
+    }
 
-      // When marked completed, automatically ensure returnable appliances are added to serverBorrowed without duplication
-      if (status === "completed" && Array.isArray(found.items)) {
-        for (const rawItem of found.items) {
-          const itemStr = String(rawItem);
-          if (isReturnableItem(itemStr)) {
-            const baseName = extractBaseApplianceName(itemStr);
-            const already = serverBorrowed.some(
-              b => (b.requestId && found.id && b.requestId === found.id && extractBaseApplianceName(b.itemName) === baseName) ||
-                   (b.roomId.trim().toLowerCase() === found.roomId.trim().toLowerCase() &&
-                    extractBaseApplianceName(b.itemName) === baseName &&
-                    b.status === "borrowed")
-            );
-            if (!already) {
-              serverBorrowed.unshift({
-                id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-                roomId: found.roomId,
-                itemName: itemStr,
-                status: "borrowed",
-                createdAt: Date.now(),
-                requestId: found.id
-              });
-            }
+    // 1. Sync update to Supabase guest_requests table first
+    try {
+      await updateRequestStatusInSupabase(id, status);
+    } catch (e: any) {
+      console.warn("[SUPABASE] Status update error:", e?.message || e);
+    }
+
+    // 2. Locate or hydrate in serverRequests memory
+    let found = serverRequests.find(r => r.id === id);
+    if (!found) {
+      try {
+        const supaReqs = await fetchRequestsFromSupabase();
+        const dbReq = supaReqs?.find(r => r.id === id);
+        if (dbReq) {
+          found = { ...dbReq, status };
+          serverRequests.unshift(found);
+        }
+      } catch (e) {}
+    }
+
+    if (found) {
+      found.status = status;
+    }
+
+    const createdBorrowed: BorrowedRecord[] = [];
+
+    // 3. When marked completed, automatically track returnable items in Borrowed section
+    if (status === "completed" && found && Array.isArray(found.items)) {
+      for (const rawItem of found.items) {
+        const itemStr = String(rawItem);
+        if (isReturnableItem(itemStr)) {
+          const canonicalName = normalizeReturnableName(itemStr);
+          const baseName = extractBaseApplianceName(canonicalName);
+
+          const already = serverBorrowed.some(
+            b => (b.roomId.trim().toLowerCase() === found!.roomId.trim().toLowerCase() &&
+                 extractBaseApplianceName(b.itemName) === baseName &&
+                 b.status === "borrowed")
+          );
+
+          if (!already) {
+            const newBor: BorrowedRecord = {
+              id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+              roomId: found.roomId,
+              itemName: canonicalName,
+              status: "borrowed",
+              createdAt: Date.now(),
+              requestId: found.id
+            };
+            serverBorrowed.unshift(newBor);
+            createdBorrowed.push(newBor);
+            // Persist to Supabase borrowed_items table
+            await saveBorrowedToSupabase(newBor).catch(e => {
+              console.warn("[SUPABASE] Save borrowed error:", e?.message || e);
+            });
           }
         }
       }
-
-      // Sync update to Supabase guest_requests
-      updateRequestStatusInSupabase(id, status).catch(e => {
-        console.warn("[SUPABASE] Status update error:", e);
-      });
-      return res.json({ success: true, request: found });
-    }
-    
-    // Also try updating directly in Supabase if not found in memory
-    if (status === "pending" || status === "completed") {
-      const supaRes = await updateRequestStatusInSupabase(id, status);
-      if (supaRes.success) {
-        return res.json({ success: true, message: "Updated in Supabase" });
+    } else if (status === "pending" && found) {
+      // If toggled back to pending, mark any active borrowed records for this request as returned
+      const toReturn = serverBorrowed.filter(b => b.requestId === found!.id && b.status === "borrowed");
+      for (const b of toReturn) {
+        b.status = "returned";
+        b.returnedAt = Date.now();
+        markBorrowedReturnedInSupabase(b.id).catch(e => console.warn("[SUPABASE] Mark returned error:", e));
       }
     }
 
-    res.status(404).json({ success: false, message: "Request not found or invalid status" });
+    return res.json({ 
+      success: true, 
+      request: found || { id, status }, 
+      borrowedCreated: createdBorrowed 
+    });
   };
   app.patch("/api/requests/:id", handleUpdateStatus);
   app.put("/api/requests/:id", handleUpdateStatus);
@@ -717,42 +837,18 @@ async function startServer() {
     }
   }
 
-  // Webhook Endpoint for Notifications (Resend Email API + Supabase Storage)
+  // Webhook Endpoint for Notifications (Resend Email API notification dispatch)
   app.post("/api/notify", async (req, res) => {
-    const { roomNumber, items, customMessage, id: providedId } = req.body;
+    const { roomNumber, items, customMessage } = req.body;
     
-    // Also record in server requests store so staff dashboard always sees it
-    const newReq: ServerRequest = {
-      id: providedId || `srv-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-      roomId: String(roomNumber || "Unknown"),
-      items: Array.isArray(items) ? items : [],
-      customMessage: customMessage || "",
-      status: "pending",
-      createdAt: Date.now()
-    };
-    
-    const isDup = serverRequests.some(r => 
-      r.roomId === newReq.roomId && 
-      JSON.stringify(r.items) === JSON.stringify(newReq.items) &&
-      Math.abs(r.createdAt - newReq.createdAt) < 10000
-    );
-    if (!isDup) {
-      serverRequests.unshift(newReq);
-    }
-
-    // Persist to Supabase database table
-    saveRequestToSupabase(newReq).catch(err => {
-      console.warn("[SUPABASE] Sync error during notify:", err);
-    });
-
     // Trigger email alert
     const emailResult = await sendStaffEmailAlert({
-      roomNumber: newReq.roomId,
-      items: newReq.items,
-      customMessage: newReq.customMessage
+      roomNumber: String(roomNumber || "Unknown"),
+      items: Array.isArray(items) ? items : [],
+      customMessage: customMessage || ""
     });
     
-    res.json({ success: true, message: "Staff notified successfully", email: emailResult, request: newReq });
+    res.json({ success: true, message: "Staff notification processed", email: emailResult });
   });
 
   // Diagnostic Endpoint: Check email configuration

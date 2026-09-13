@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { collection, addDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
+import { collection, setDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { COMMON_ITEMS, DEFAULT_ROOMS, Room, getItemUnitConsumption } from "../types";
 import { cn } from "../lib/utils";
@@ -347,31 +347,21 @@ export default function GuestView() {
         localStorage.setItem("hues_stay_requests", JSON.stringify(cached));
       } catch (e) {}
 
-      // 2. Fire and sync Firestore write non-blockingly
+      // 2. Fire and sync Firestore write non-blockingly using canonical reqId as doc ID
       const firestoreTask = (async () => {
         try {
-          await addDoc(collection(db, "requests"), requestData);
+          await setDoc(doc(db, "requests", reqId), requestData);
         } catch (err: any) {
           console.warn("Firestore sync background notification:", err?.message || "offline");
         }
       })();
 
-      // 3. Trigger server sync & email webhook non-blockingly
+      // 3. Trigger server sync & email webhook non-blockingly (handles Supabase + Email dispatch in one shot)
       fetch('/api/requests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestData)
       }).catch(err => console.warn("Server API sync:", err));
-
-      fetch('/api/notify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roomNumber,
-          items: finalItems,
-          customMessage: customMessage.trim()
-        })
-      }).catch(err => console.warn("Email alert dispatch in background:", err));
 
       // Limit waiting time to maximum 600ms so guest gets immediate feedback
       await Promise.race([

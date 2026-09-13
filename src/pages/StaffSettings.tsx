@@ -12,6 +12,18 @@ import {
 import toast, { Toaster } from "react-hot-toast";
 import { useOutletContext } from "react-router-dom";
 
+function isCorruptOrDuplicateItem(name: string): boolean {
+  if (!name) return true;
+  const lower = name.trim().toLowerCase();
+  if (lower.includes("(qty:") || lower.includes("qty:") || /\(\d+x?\)/.test(lower) || /x\s*\d+$/.test(lower)) {
+    return true;
+  }
+  if (lower === "kettle" || lower === "glasses" || lower === "water glasses" || lower === "water glass") {
+    return true;
+  }
+  return false;
+}
+
 export default function StaffSettings() {
   const { role } = useOutletContext<{ role: "superhost" | "staff" }>();
   
@@ -29,14 +41,23 @@ export default function StaffSettings() {
   });
 
   const [inventoryMap, setInventoryMap] = useState<Record<string, { id?: string, limit: number, inUse: number }>>(() => {
-    try {
-      const saved = localStorage.getItem("hues_stay_inventory");
-      if (saved) return JSON.parse(saved);
-    } catch (e) {}
     const init: Record<string, { id?: string, limit: number, inUse: number }> = {};
     COMMON_ITEMS.filter(i => i.category === 'Item').forEach(item => {
       init[item.name] = { inUse: 0, limit: item.defaultLimit || 1 };
     });
+    try {
+      const saved = localStorage.getItem("hues_stay_inventory");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object") {
+          Object.keys(parsed).forEach(k => {
+            if (!isCorruptOrDuplicateItem(k)) {
+              init[k] = parsed[k];
+            }
+          });
+        }
+      }
+    } catch (e) {}
     return init;
   });
 
@@ -64,21 +85,23 @@ export default function StaffSettings() {
 
         const loadTask = (async () => {
           // 1. Fetch amenities from Firestore
-          const docRef = doc(db, "settings", "amenities");
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists() && isMounted) {
-            const dbData = docSnap.data();
-            setAmenityStatus(prev => {
-              const next = { ...prev };
-              COMMON_ITEMS.forEach(item => {
-                if (dbData[item.name]) next[item.name] = dbData[item.name];
+          try {
+            const docRef = doc(db, "settings", "amenities");
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists() && isMounted) {
+              const dbData = docSnap.data();
+              setAmenityStatus(prev => {
+                const next = { ...prev };
+                COMMON_ITEMS.forEach(item => {
+                  if (dbData[item.name]) next[item.name] = dbData[item.name];
+                });
+                try {
+                  localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
+                } catch (e) {}
+                return next;
               });
-              try {
-                localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
-              } catch (e) {}
-              return next;
-            });
-          }
+            }
+          } catch (e) {}
 
           // 2. Fetch inventory live from Supabase table /api/inventory
           try {
@@ -89,11 +112,13 @@ export default function StaffSettings() {
                 setInventoryMap(prev => {
                   const next = { ...prev };
                   data.inventory.forEach((inv: any) => {
-                    next[inv.name] = {
-                      id: inv.id,
-                      limit: inv.totalStock ?? inv.limit ?? 1,
-                      inUse: inv.taken ?? 0
-                    };
+                    if (!isCorruptOrDuplicateItem(inv.name)) {
+                      next[inv.name] = {
+                        id: inv.id,
+                        limit: inv.totalStock ?? inv.limit ?? 1,
+                        inUse: inv.taken ?? 0
+                      };
+                    }
                   });
                   try {
                     localStorage.setItem("hues_stay_inventory", JSON.stringify(next));
@@ -104,29 +129,6 @@ export default function StaffSettings() {
             }
           } catch (e) {
             console.warn("Supabase inventory sync note:", e);
-          }
-
-          // 3. Fallback Firestore inventory sync
-          const invSnapshot = await getDocs(collection(db, "inventory"));
-          if (!invSnapshot.empty && isMounted) {
-            const currentInventory: Record<string, { id: string, inUse: number, limit: number }> = {};
-            invSnapshot.forEach(d => {
-              const data = d.data();
-              currentInventory[data.name] = { id: d.id, inUse: data.inUse || 0, limit: data.limit || 1 };
-            });
-
-            setInventoryMap(prev => {
-              const next = { ...prev };
-              Object.keys(currentInventory).forEach(name => {
-                if (!next[name] || !next[name].limit) {
-                  next[name] = currentInventory[name];
-                }
-              });
-              try {
-                localStorage.setItem("hues_stay_inventory", JSON.stringify(next));
-              } catch (e) {}
-              return next;
-            });
           }
         })();
 
@@ -317,7 +319,7 @@ export default function StaffSettings() {
     const itemMap = new Map<string, { name: string, category: 'Service' | 'Item', isLimited?: boolean }>();
     COMMON_ITEMS.forEach(i => itemMap.set(i.name, i));
     Object.keys(inventoryMap).forEach(name => {
-      if (!itemMap.has(name)) {
+      if (!isCorruptOrDuplicateItem(name) && !itemMap.has(name)) {
         itemMap.set(name, { name, category: 'Item', isLimited: true });
       }
     });

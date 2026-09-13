@@ -1,6 +1,4 @@
 import React, { useEffect, useState, useMemo } from "react";
-import { collection, query, orderBy, onSnapshot, doc, updateDoc, deleteDoc, where, getDocs, addDoc } from "firebase/firestore";
-import { db } from "../lib/firebase";
 import { RoomRequest, BorrowedItem, isReturnableItem } from "../types";
 import { formatDistanceToNow } from "date-fns";
 import { 
@@ -34,6 +32,39 @@ function getDismissedRequestIds(): string[] {
   }
 }
 
+function deduplicateRequests(reqList: RoomRequest[]): RoomRequest[] {
+  const result: RoomRequest[] = [];
+  const seenIds = new Set<string>();
+
+  for (const r of reqList) {
+    if (!r) continue;
+    const id = r.id || "";
+    if (id && seenIds.has(id)) continue;
+
+    const roomStr = String(r.roomId || "").trim().toLowerCase();
+    const itemsSig = (r.items || []).slice().sort().join(',').toLowerCase();
+    const msgSig = (r.customMessage || "").trim().toLowerCase();
+
+    // Check if duplicate of an existing item within a 3-minute window
+    const isDuplicate = result.some(existing => {
+      if (String(existing.roomId || "").trim().toLowerCase() !== roomStr) return false;
+      const exItems = (existing.items || []).slice().sort().join(',').toLowerCase();
+      if (exItems !== itemsSig) return false;
+      const exMsg = (existing.customMessage || "").trim().toLowerCase();
+      if (exMsg !== msgSig) return false;
+      const timeDiff = Math.abs((existing.createdAt || 0) - (r.createdAt || 0));
+      return timeDiff < 180000;
+    });
+
+    if (!isDuplicate) {
+      if (id) seenIds.add(id);
+      result.push(r);
+    }
+  }
+
+  return result;
+}
+
 function normalizeApplianceName(name: string): string {
   const lower = (name || "").toLowerCase().trim();
   if (lower.includes("glass")) return "Glasses (Set of 2)";
@@ -56,9 +87,10 @@ export default function StaffDashboard() {
       if (saved) {
         const parsed = JSON.parse(saved);
         const dismissed = getDismissedRequestIds();
-        return (Array.isArray(parsed) ? parsed : []).filter((r: RoomRequest) => 
+        const filtered = (Array.isArray(parsed) ? parsed : []).filter((r: RoomRequest) => 
           !dismissed.includes(r.id || "")
         );
+        return deduplicateRequests(filtered);
       }
     } catch (e) {}
     return [];
@@ -88,14 +120,17 @@ export default function StaffDashboard() {
               .filter((r: RoomRequest) => !dismissed.includes(r.id || ""))
               .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
             
-            setRequests(valid);
+            const deduplicated = deduplicateRequests(valid);
+            setRequests(deduplicated);
             try {
-              localStorage.setItem("hues_stay_requests", JSON.stringify(valid));
+              localStorage.setItem("hues_stay_requests", JSON.stringify(deduplicated));
             } catch (e) {}
           }
         }
       } catch (e: any) {
         console.warn("Server requests fetch error:", e?.message || "error");
+      } finally {
+        setLoading(false);
       }
     };
 
@@ -131,7 +166,10 @@ export default function StaffDashboard() {
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === "hues_stay_requests" && e.newValue) {
         try {
-          setRequests(JSON.parse(e.newValue));
+          const parsed = JSON.parse(e.newValue);
+          if (Array.isArray(parsed)) {
+            setRequests(deduplicateRequests(parsed));
+          }
         } catch (err) {}
       }
       if (e.key === "hues_stay_borrowed" && e.newValue) {
@@ -142,63 +180,9 @@ export default function StaffDashboard() {
     };
     window.addEventListener("storage", handleStorageChange);
 
-    // 3. Firestore live snapshot (optional supplement)
-    const q = query(collection(db, "requests"), orderBy("createdAt", "desc"));
-    
-    const unsubscribeReqs = onSnapshot(q, (snapshot) => {
-      const reqs: RoomRequest[] = [];
-      snapshot.forEach((docSnap) => {
-        reqs.push({ id: docSnap.id, ...docSnap.data() } as RoomRequest);
-      });
-      if (reqs.length > 0) {
-        const dismissed = getDismissedRequestIds();
-        const valid = reqs
-          .filter(r => !dismissed.includes(r.id || ""))
-          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-        setRequests(valid);
-        try {
-          localStorage.setItem("hues_stay_requests", JSON.stringify(valid));
-        } catch (e) {}
-      }
-      setLoading(false);
-    }, (error) => {
-      console.warn("Real-time requests error, using server/cached requests:", error?.message || "offline");
-      setLoading(false);
-    });
-
-    const bq = query(collection(db, "borrowed_items"), orderBy("createdAt", "desc"));
-    const unsubscribeBorrowed = onSnapshot(bq, (snapshot) => {
-      const itemsMap = new Map<string, BorrowedItem>();
-      snapshot.forEach((docSnap) => {
-        const d = docSnap.data();
-        const item: BorrowedItem = {
-          id: docSnap.id,
-          roomId: String(d.roomId || ""),
-          itemName: String(d.itemName || ""),
-          status: d.status || "borrowed",
-          createdAt: typeof d.createdAt === "number" ? d.createdAt : Date.now(),
-          requestId: d.requestId ? String(d.requestId) : undefined
-        };
-        const canonical = normalizeApplianceName(item.itemName);
-        const key = item.status === "borrowed"
-          ? `${item.roomId.toLowerCase().trim()}::${canonical.toLowerCase()}`
-          : item.id;
-        itemsMap.set(key, { ...item, itemName: canonical });
-      });
-      const uniqueItems = Array.from(itemsMap.values());
-      setBorrowedItems(uniqueItems);
-      try {
-        localStorage.setItem("hues_stay_borrowed", JSON.stringify(uniqueItems));
-      } catch (e) {}
-    }, (error) => {
-      console.warn("Real-time borrowed items listener:", error?.message || "offline");
-    });
-
     return () => {
       clearInterval(interval);
       window.removeEventListener("storage", handleStorageChange);
-      unsubscribeReqs();
-      unsubscribeBorrowed();
     };
   }, []);
 
@@ -213,169 +197,82 @@ export default function StaffDashboard() {
       localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
     } catch (e) {}
 
-    // 2. Determine returnable appliances (e.g., Kettle, Iron Box, Hair Dryer, etc.)
+    // 2. Determine returnable items (Teakettle, Iron Box, Leg Massager, Laptop Table, Glasses, USB Adaptor, etc.)
     const returnableItems = (targetReq.items || []).filter(item => isReturnableItem(item));
 
-    if (returnableItems.length > 0) {
-      const newBorrowedRecords: BorrowedItem[] = [];
-
-      for (const item of returnableItems) {
-        // Prevent duplicate active entries for the same room & appliance
-        const alreadyActive = borrowedItems.some(
-          b => b.roomId === targetReq.roomId && 
-               b.itemName.toLowerCase() === item.toLowerCase() && 
-               b.status === 'borrowed'
-        );
-
-        if (!alreadyActive) {
-          const newBorrowed: BorrowedItem = {
-            id: `borrowed-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            roomId: targetReq.roomId,
-            itemName: item,
-            status: 'borrowed',
-            createdAt: Date.now(),
-            requestId: targetReq.id
-          };
-          newBorrowedRecords.push(newBorrowed);
-        }
-      }
-
-      if (newBorrowedRecords.length > 0) {
-        const updatedBorrowed = [...newBorrowedRecords, ...borrowedItems];
-        setBorrowedItems(updatedBorrowed);
-        try {
-          localStorage.setItem("hues_stay_borrowed", JSON.stringify(updatedBorrowed));
-        } catch (e) {}
-
-        // Automatically sync each borrowed record to backend and Supabase
-        for (const b of newBorrowedRecords) {
-          fetch('/api/borrowed', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(b)
-          }).catch(e => console.warn("Backend borrowed sync:", e));
-
-          // Also persist to Firestore
-          addDoc(collection(db, "borrowed_items"), {
-            roomId: b.roomId,
-            itemName: b.itemName,
-            status: 'borrowed',
-            createdAt: b.createdAt,
-            requestId: b.requestId || targetReq.id
-          }).catch(e => console.warn("Firestore borrowed sync:", e));
-        }
-
-        toast.success(
-          `Delivered to Room ${targetReq.roomId}! ${returnableItems.join(", ")} is now logged in the Borrowed section (needs collection).`,
-          { duration: 5500 }
-        );
-      } else {
-        toast.success("Request marked as completed");
-      }
-    } else {
-      toast.success("Request marked as completed");
-    }
-
-    // 3. Sync request completion to backend and Supabase
-    fetch(`/api/requests/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'completed' })
-    }).catch(e => console.warn("Server status update:", e?.message || "offline"));
-
+    // 3. Send update to server & Supabase
     try {
-      if (!id.startsWith("local-req-") && !id.startsWith("srv-") && id !== "req-101-initial") {
-        await updateDoc(doc(db, "requests", id), {
-          status: "completed"
-        });
+      const res = await fetch(`/api/requests/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'completed' })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // If borrowed items were created on server, update state immediately
+        if (data.borrowedCreated && data.borrowedCreated.length > 0) {
+          setBorrowedItems(prev => {
+            const nextList = [...data.borrowedCreated, ...prev];
+            try {
+              localStorage.setItem("hues_stay_borrowed", JSON.stringify(nextList));
+            } catch (e) {}
+            return nextList;
+          });
+          toast.success(
+            `Delivered to Room ${targetReq.roomId}! ${data.borrowedCreated.map((b: any) => b.itemName).join(", ")} moved to Borrowed to remind staff to collect before checkout.`,
+            { duration: 5000 }
+          );
+        } else {
+          toast.success(`Request for Room ${targetReq.roomId} marked as completed.`);
+        }
       }
-    } catch (error: any) {
-      console.warn("Remote sync completed request error:", error?.message || "offline");
+    } catch (e: any) {
+      console.warn("Status update error:", e);
     }
   };
 
   const handleToggleStatus = async (id: string, currentStatus: "pending" | "completed") => {
     const targetReq = requests.find(r => r.id === id);
     const newStatus: "pending" | "completed" = currentStatus === "completed" ? "pending" : "completed";
+    
+    // 1. Optimistic local update
     const updated = requests.map(r => r.id === id ? { ...r, status: newStatus } : r);
     setRequests(updated);
     try {
       localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
     } catch (e) {}
 
-    // If changing from pending to completed, automatically transfer appliances to Borrowed
-    if (newStatus === "completed" && targetReq) {
-      const returnableItems = (targetReq.items || []).filter(item => isReturnableItem(item));
-      const newBorrowedRecords: BorrowedItem[] = [];
-
-      for (const item of returnableItems) {
-        const alreadyActive = borrowedItems.some(
-          b => b.roomId === targetReq.roomId && 
-               b.itemName.toLowerCase() === item.toLowerCase() && 
-               b.status === 'borrowed'
-        );
-        if (!alreadyActive) {
-          const newBorrowed: BorrowedItem = {
-            id: `borrowed-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            roomId: targetReq.roomId,
-            itemName: item,
-            status: 'borrowed',
-            createdAt: Date.now(),
-            requestId: targetReq.id
-          };
-          newBorrowedRecords.push(newBorrowed);
-        }
-      }
-
-      if (newBorrowedRecords.length > 0) {
-        const updatedBorrowed = [...newBorrowedRecords, ...borrowedItems];
-        setBorrowedItems(updatedBorrowed);
-        try {
-          localStorage.setItem("hues_stay_borrowed", JSON.stringify(updatedBorrowed));
-        } catch (e) {}
-
-        for (const b of newBorrowedRecords) {
-          fetch('/api/borrowed', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(b)
-          }).catch(e => console.warn("Backend borrowed sync:", e));
-
-          addDoc(collection(db, "borrowed_items"), {
-            roomId: b.roomId,
-            itemName: b.itemName,
-            status: 'borrowed',
-            createdAt: b.createdAt,
-            requestId: b.requestId || targetReq.id
-          }).catch(e => console.warn("Firestore borrowed sync:", e));
-        }
-
-        toast.success(
-          `Delivered to Room ${targetReq.roomId}! ${returnableItems.join(", ")} moved to Borrowed.`,
-          { duration: 4000 }
-        );
-      } else {
-        toast.success("Request marked as completed");
-      }
-    } else {
-      toast.success(`Request marked as ${newStatus}`);
-    }
-
-    // Sync with server API & Supabase
-    fetch(`/api/requests/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus })
-    }).catch(e => console.warn("Server status toggle:", e?.message || "offline"));
-
+    // 2. Call server
     try {
-      if (!id.startsWith("local-req-") && !id.startsWith("srv-") && id !== "req-101-initial") {
-        await updateDoc(doc(db, "requests", id), {
-          status: newStatus
-        });
+      const res = await fetch(`/api/requests/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (newStatus === "completed" && data.borrowedCreated && data.borrowedCreated.length > 0) {
+          setBorrowedItems(prev => {
+            const nextList = [...data.borrowedCreated, ...prev];
+            try {
+              localStorage.setItem("hues_stay_borrowed", JSON.stringify(nextList));
+            } catch (e) {}
+            return nextList;
+          });
+          toast.success(
+            `Delivered to Room ${targetReq?.roomId || ""}! ${data.borrowedCreated.map((b: any) => b.itemName).join(", ")} moved to Borrowed.`,
+            { duration: 4500 }
+          );
+        } else {
+          // If changed back to pending, re-fetch borrowed items
+          fetch("/api/borrowed").then(r => r.json()).then(d => {
+            if (d.items) setBorrowedItems(d.items);
+          }).catch(() => {});
+          toast.success(`Request marked as ${newStatus}`);
+        }
       }
-    } catch (error: any) {
-      console.warn("Remote sync status error:", error?.message || "offline");
+    } catch (e: any) {
+      console.warn("Toggle status error:", e);
     }
   };
 
@@ -402,14 +299,6 @@ export default function StaffDashboard() {
 
     // Sync with server API (removes from active queue, strictly preserves in Supabase)
     fetch(`/api/requests/${id}`, { method: 'DELETE' }).catch(e => console.warn("Server delete:", e?.message || "offline"));
-
-    try {
-      if (!id.startsWith("local-req-") && !id.startsWith("srv-") && id !== "req-101-initial") {
-        await deleteDoc(doc(db, "requests", id));
-      }
-    } catch (error: any) {
-      console.warn("Remote delete request error:", error?.message || "offline");
-    }
   };
 
   const handleClearCompleted = async () => {
@@ -458,42 +347,30 @@ export default function StaffDashboard() {
     toast.success(`Collected ${itemName} back from Room ${room || 'room'}! Returned to inventory.`);
 
     // 2. Automatically sync to backend and Supabase
-    fetch(`/api/borrowed/${borrowedId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'returned', itemName })
-    }).catch(e => console.warn("Backend return sync:", e));
-
     try {
-      if (!borrowedId.startsWith("borrowed-")) {
-        await updateDoc(doc(db, "borrowed_items", borrowedId), {
-          status: "returned",
-          returnedAt: Date.now()
-        });
-      }
-
-      const invQ = query(collection(db, "inventory"), where("name", "==", itemName));
-      const invSnap = await getDocs(invQ);
-      if (!invSnap.empty) {
-        const invDoc = invSnap.docs[0];
-        const currentInUse = invDoc.data().inUse || 0;
-        await updateDoc(invDoc.ref, {
-          inUse: Math.max(0, currentInUse - 1)
-        });
-      }
-    } catch (error: any) {
-      console.warn("Remote mark returned sync error:", error?.message || "offline");
+      await fetch(`/api/borrowed/${borrowedId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'returned', itemName })
+      });
+    } catch (e) {
+      console.warn("Backend return sync:", e);
     }
   };
 
-  const handleDeleteBorrowed = (id: string, itemName: string) => {
+  const handleDeleteBorrowed = async (id: string, itemName: string) => {
     setBorrowedItems(prev => prev.filter(b => b.id !== id));
     try {
       const saved = JSON.parse(localStorage.getItem("hues_stay_borrowed") || "[]");
       const next = saved.filter((b: any) => b.id !== id);
       localStorage.setItem("hues_stay_borrowed", JSON.stringify(next));
     } catch (e) {}
-    toast.success(`Removed ${itemName} from dashboard view (records preserved in database).`);
+    toast.success(`Removed ${itemName} from dashboard view.`);
+    try {
+      await fetch(`/api/borrowed/${id}`, { method: 'DELETE' });
+    } catch (e) {
+      console.warn("Backend delete borrowed error:", e);
+    }
   };
 
   const pendingRequests = requests.filter(r => r.status === "pending");
@@ -504,9 +381,10 @@ export default function StaffDashboard() {
     borrowedItems
       .filter(b => b.status === "borrowed")
       .forEach(b => {
-        const key = `${b.roomId.toLowerCase().trim()}::${b.itemName.toLowerCase().trim()}`;
+        const normalized = normalizeApplianceName(b.itemName);
+        const key = `${b.roomId.toLowerCase().trim()}::${normalized.toLowerCase().trim()}`;
         if (!map.has(key)) {
-          map.set(key, b);
+          map.set(key, { ...b, itemName: normalized });
         }
       });
     return Array.from(map.values());

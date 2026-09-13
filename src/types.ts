@@ -85,19 +85,24 @@ export function getItemUnitConsumption(itemName: string): number {
   return 1;
 }
 
+export function normalizeReturnableName(rawName: string): string {
+  const base = extractBaseItemName(rawName).trim();
+  const lower = base.toLowerCase();
+  if (lower.includes("teakettle") || lower.includes("kettle")) return "Teakettle";
+  if (lower.includes("iron")) return "Iron Box";
+  if (lower.includes("hair dryer") || lower.includes("dryer")) return "Hair Dryer";
+  if (lower.includes("laptop")) return "Laptop Table";
+  if (lower.includes("massager")) return "Leg Massager (Paid)";
+  if (lower.includes("glass")) return "Glasses (Set of 2)";
+  if (lower.includes("usb 2")) return "USB 2.0 Adaptor + Cable";
+  if (lower.includes("usb 3")) return "USB 3.0 Adaptor + Cable";
+  if (lower.includes("usb") || lower.includes("adaptor") || lower.includes("cable")) return "USB Adaptor + Cable";
+  return base;
+}
+
 export function isReturnableItem(name: string): boolean {
   if (!name) return false;
   const clean = extractBaseItemName(name).trim().toLowerCase();
-
-  // Glass / Glasses (Set of 2) is physical & returnable
-  if (clean.includes('glass')) {
-    return true;
-  }
-
-  // Teakettle / Kettle is physical & returnable
-  if (clean.includes('kettle') || clean.includes('teakettle')) {
-    return true;
-  }
 
   // Explicit non-returnables (consumables, one-way supplies, and services)
   const nonReturnableKeywords = [
@@ -109,12 +114,31 @@ export function isReturnableItem(name: string): boolean {
     return false;
   }
 
+  // Explicit tracked borrowed appliances & durable goods:
+  // Teakettle, Iron Box, Leg Massager, Laptop Table, Glasses, USB Adaptor and Cable, Hair Dryer
+  if (
+    clean.includes('kettle') || 
+    clean.includes('teakettle') ||
+    clean.includes('iron') ||
+    clean.includes('massager') ||
+    clean.includes('laptop table') ||
+    clean.includes('glass') ||
+    clean.includes('adaptor') ||
+    clean.includes('adapter') ||
+    clean.includes('cable') ||
+    clean.includes('usb') ||
+    clean.includes('hair dryer') ||
+    clean.includes('dryer')
+  ) {
+    return true;
+  }
+
   const found = COMMON_ITEMS.find(i => i.name.toLowerCase() === clean);
   if (found) {
     return found.category === 'Item';
   }
 
-  return true;
+  return false;
 }
 
 export const DEFAULT_ROOMS: Room[] = [
