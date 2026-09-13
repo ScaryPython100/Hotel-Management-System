@@ -1,5 +1,15 @@
 import React, { useEffect, useState, useMemo } from "react";
-import { RoomRequest, BorrowedItem, isReturnableItem } from "../types";
+import { RoomRequest, BorrowedItem, isReturnableItem, normalizeReturnableName } from "../types";
+import { 
+  fetchLiveRequests, 
+  fetchLiveBorrowed, 
+  updateLiveRequestStatus, 
+  markLiveBorrowedReturned, 
+  deleteLiveBorrowed, 
+  dismissLiveRequest, 
+  saveLiveBorrowed, 
+  getClientSupabase 
+} from "../lib/supabaseClient";
 import { formatDistanceToNow } from "date-fns";
 import { 
   CheckCircle2, 
@@ -15,7 +25,8 @@ import {
   Check,
   RotateCcw,
   History,
-  ArchiveRestore
+  ArchiveRestore,
+  Mail
 } from "lucide-react";
 import toast, { Toaster } from "react-hot-toast";
 
@@ -108,81 +119,71 @@ export default function StaffDashboard() {
   const [tableFilter, setTableFilter] = useState<'all' | 'pending' | 'completed'>('all');
 
   useEffect(() => {
-    // 1. Fetch from server /api/requests (Shared single source of truth across all devices)
-    const fetchServerRequests = async () => {
+    // Shared single source of truth across all devices (Supabase live queries with API fallback)
+    const refreshData = async () => {
       try {
-        const res = await fetch("/api/requests");
-        if (res.ok) {
-          const data = await res.json();
-          if (data.requests && Array.isArray(data.requests)) {
-            const dismissed = getDismissedRequestIds();
-            const valid = data.requests
-              .filter((r: RoomRequest) => !dismissed.includes(r.id || ""))
-              .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
-            
-            const deduplicated = deduplicateRequests(valid);
-            setRequests(deduplicated);
-            try {
-              localStorage.setItem("hues_stay_requests", JSON.stringify(deduplicated));
-            } catch (e) {}
-          }
+        const [liveReqs, liveBor] = await Promise.all([
+          fetchLiveRequests(),
+          fetchLiveBorrowed()
+        ]);
+
+        if (Array.isArray(liveReqs) && liveReqs.length > 0) {
+          const dismissed = getDismissedRequestIds();
+          const valid = liveReqs
+            .filter((r: RoomRequest) => !dismissed.includes(r.id || ""))
+            .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
+          
+          const deduplicated = deduplicateRequests(valid);
+          setRequests(deduplicated);
+          try {
+            localStorage.setItem("hues_stay_requests", JSON.stringify(deduplicated));
+          } catch (e) {}
+        }
+
+        if (Array.isArray(liveBor)) {
+          const sorted = liveBor.sort((a: BorrowedItem, b: BorrowedItem) => (b.createdAt || 0) - (a.createdAt || 0));
+          setBorrowedItems(sorted);
+          try {
+            localStorage.setItem("hues_stay_borrowed", JSON.stringify(sorted));
+          } catch (e) {}
         }
       } catch (e: any) {
-        console.warn("Server requests fetch error:", e?.message || "error");
+        console.warn("Live sync refresh error:", e?.message || e);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchServerRequests();
-    
-    // Fetch server borrowed items
-    const fetchServerBorrowed = async () => {
+    // Initial load
+    refreshData();
+
+    // Realtime Supabase change listener across all laptops, phones, and tabs
+    const sb = getClientSupabase();
+    let channel: any = null;
+    if (sb) {
       try {
-        const res = await fetch("/api/borrowed");
-        if (res.ok) {
-          const data = await res.json();
-          if (data.items && Array.isArray(data.items)) {
-            const items = data.items.sort((a: BorrowedItem, b: BorrowedItem) => (b.createdAt || 0) - (a.createdAt || 0));
-            setBorrowedItems(items);
-            try {
-              localStorage.setItem("hues_stay_borrowed", JSON.stringify(items));
-            } catch (e) {}
-          }
-        }
-      } catch (e: any) {
-        console.warn("Server borrowed fetch error:", e?.message || "error");
+        channel = sb
+          .channel("staff_live_channel")
+          .on("postgres_changes", { event: "*", schema: "public", table: "guest_requests" }, () => {
+            refreshData();
+          })
+          .on("postgres_changes", { event: "*", schema: "public", table: "borrowed_items" }, () => {
+            refreshData();
+          })
+          .subscribe();
+      } catch (err) {
+        console.warn("Realtime subscription setup:", err);
       }
-    };
-    fetchServerBorrowed();
+    }
 
-    // Fast polling ensures instant sync across tabs, phones, and computers
-    const interval = setInterval(() => {
-      fetchServerRequests();
-      fetchServerBorrowed();
-    }, 2000);
-
-    // 2. Cross-tab storage synchronization
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === "hues_stay_requests" && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
-          if (Array.isArray(parsed)) {
-            setRequests(deduplicateRequests(parsed));
-          }
-        } catch (err) {}
-      }
-      if (e.key === "hues_stay_borrowed" && e.newValue) {
-        try {
-          setBorrowedItems(JSON.parse(e.newValue));
-        } catch (err) {}
-      }
-    };
-    window.addEventListener("storage", handleStorageChange);
+    // Fast 2-second polling fallback ensures guaranteed synchronization
+    const interval = setInterval(refreshData, 2000);
 
     return () => {
       clearInterval(interval);
-      window.removeEventListener("storage", handleStorageChange);
+      if (channel && sb) {
+        sb.removeChannel(channel).catch(() => {});
+      }
     };
   }, []);
 
@@ -197,38 +198,54 @@ export default function StaffDashboard() {
       localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
     } catch (e) {}
 
-    // 2. Determine returnable items (Teakettle, Iron Box, Leg Massager, Laptop Table, Glasses, USB Adaptor, etc.)
-    const returnableItems = (targetReq.items || []).filter(item => isReturnableItem(item));
+    // 2. Identify returnable appliances (Teakettle, Iron Box, Hair Dryer, Laptop Table, Glasses, USB Adaptor, etc.)
+    const returnableItems = (targetReq.items || [])
+      .filter(item => isReturnableItem(item))
+      .map(item => normalizeReturnableName(item));
 
-    // 3. Send update to server & Supabase
-    try {
-      const res = await fetch(`/api/requests/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'completed' })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        // If borrowed items were created on server, update state immediately
-        if (data.borrowedCreated && data.borrowedCreated.length > 0) {
-          setBorrowedItems(prev => {
-            const nextList = [...data.borrowedCreated, ...prev];
-            try {
-              localStorage.setItem("hues_stay_borrowed", JSON.stringify(nextList));
-            } catch (e) {}
-            return nextList;
-          });
-          toast.success(
-            `Delivered to Room ${targetReq.roomId}! ${data.borrowedCreated.map((b: any) => b.itemName).join(", ")} moved to Borrowed to remind staff to collect before checkout.`,
-            { duration: 5000 }
-          );
-        } else {
-          toast.success(`Request for Room ${targetReq.roomId} marked as completed.`);
+    const newlyCreatedBorrowed: BorrowedItem[] = [];
+
+    if (returnableItems.length > 0) {
+      for (const itemName of returnableItems) {
+        const alreadyActive = borrowedItems.some(
+          b => b.roomId.trim().toLowerCase() === targetReq.roomId.trim().toLowerCase() &&
+               b.itemName.trim().toLowerCase() === itemName.trim().toLowerCase() &&
+               b.status === "borrowed"
+        );
+
+        if (!alreadyActive) {
+          const newBor: BorrowedItem = {
+            id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+            roomId: targetReq.roomId,
+            itemName,
+            status: "borrowed",
+            createdAt: Date.now()
+          };
+          newlyCreatedBorrowed.push(newBor);
+          saveLiveBorrowed(newBor);
         }
       }
-    } catch (e: any) {
-      console.warn("Status update error:", e);
+
+      if (newlyCreatedBorrowed.length > 0) {
+        setBorrowedItems(prev => {
+          const nextList = [...newlyCreatedBorrowed, ...prev];
+          try {
+            localStorage.setItem("hues_stay_borrowed", JSON.stringify(nextList));
+          } catch (e) {}
+          return nextList;
+        });
+      }
+
+      toast.success(
+        `Delivered to Room ${targetReq.roomId}! ${returnableItems.join(", ")} moved to Borrowed to remind staff to collect before checkout.`,
+        { duration: 5000 }
+      );
+    } else {
+      toast.success(`Request for Room ${targetReq.roomId} completed!`);
     }
+
+    // 3. Update status in live Supabase and server
+    await updateLiveRequestStatus(id, "completed");
   };
 
   const handleToggleStatus = async (id: string, currentStatus: "pending" | "completed") => {
@@ -242,38 +259,40 @@ export default function StaffDashboard() {
       localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
     } catch (e) {}
 
-    // 2. Call server
-    try {
-      const res = await fetch(`/api/requests/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (newStatus === "completed" && data.borrowedCreated && data.borrowedCreated.length > 0) {
-          setBorrowedItems(prev => {
-            const nextList = [...data.borrowedCreated, ...prev];
-            try {
-              localStorage.setItem("hues_stay_borrowed", JSON.stringify(nextList));
-            } catch (e) {}
-            return nextList;
-          });
-          toast.success(
-            `Delivered to Room ${targetReq?.roomId || ""}! ${data.borrowedCreated.map((b: any) => b.itemName).join(", ")} moved to Borrowed.`,
-            { duration: 4500 }
-          );
-        } else {
-          // If changed back to pending, re-fetch borrowed items
-          fetch("/api/borrowed").then(r => r.json()).then(d => {
-            if (d.items) setBorrowedItems(d.items);
-          }).catch(() => {});
-          toast.success(`Request marked as ${newStatus}`);
+    // 2. If marking completed, also track returnable appliances
+    if (newStatus === "completed" && targetReq && Array.isArray(targetReq.items)) {
+      const returnables = targetReq.items
+        .filter(item => isReturnableItem(item))
+        .map(item => normalizeReturnableName(item));
+
+      const toAdd: BorrowedItem[] = [];
+      for (const item of returnables) {
+        const alreadyActive = borrowedItems.some(
+          b => b.roomId.trim().toLowerCase() === targetReq.roomId.trim().toLowerCase() &&
+               b.itemName.trim().toLowerCase() === item.trim().toLowerCase() &&
+               b.status === "borrowed"
+        );
+        if (!alreadyActive) {
+          const newBor: BorrowedItem = {
+            id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+            roomId: targetReq.roomId,
+            itemName: item,
+            status: "borrowed",
+            createdAt: Date.now()
+          };
+          toAdd.push(newBor);
+          saveLiveBorrowed(newBor);
         }
       }
-    } catch (e: any) {
-      console.warn("Toggle status error:", e);
+      if (toAdd.length > 0) {
+        setBorrowedItems(prev => [...toAdd, ...prev]);
+      }
     }
+
+    toast.success(`Request marked as ${newStatus}`);
+
+    // 3. Persist to live Supabase and server
+    await updateLiveRequestStatus(id, newStatus);
   };
 
   const handleDelete = async (id: string) => {
@@ -297,8 +316,8 @@ export default function StaffDashboard() {
     } catch (e) {}
     toast.success("Request removed from dashboard (preserved in Supabase)");
 
-    // Sync with server API (removes from active queue, strictly preserves in Supabase)
-    fetch(`/api/requests/${id}`, { method: 'DELETE' }).catch(e => console.warn("Server delete:", e?.message || "offline"));
+    // Dismiss in live Supabase and server
+    await dismissLiveRequest(id);
   };
 
   const handleClearCompleted = async () => {
@@ -326,9 +345,9 @@ export default function StaffDashboard() {
       localStorage.setItem("hues_stay_requests", JSON.stringify(remaining));
     } catch (e) {}
 
-    // Tell server to soft-delete each completed item
+    // Tell Supabase to soft-delete each completed item
     for (const id of completedIds) {
-      fetch(`/api/requests/${id}`, { method: 'DELETE' }).catch(() => {});
+      dismissLiveRequest(id);
     }
 
     toast.success(`Cleared ${completed.length} completed records from view.`);
@@ -346,16 +365,8 @@ export default function StaffDashboard() {
     } catch (e) {}
     toast.success(`Collected ${itemName} back from Room ${room || 'room'}! Returned to inventory.`);
 
-    // 2. Automatically sync to backend and Supabase
-    try {
-      await fetch(`/api/borrowed/${borrowedId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'returned', itemName })
-      });
-    } catch (e) {
-      console.warn("Backend return sync:", e);
-    }
+    // 2. Automatically sync to live Supabase and backend
+    await markLiveBorrowedReturned(borrowedId);
   };
 
   const handleDeleteBorrowed = async (id: string, itemName: string) => {
@@ -366,10 +377,36 @@ export default function StaffDashboard() {
       localStorage.setItem("hues_stay_borrowed", JSON.stringify(next));
     } catch (e) {}
     toast.success(`Removed ${itemName} from dashboard view.`);
+    
+    // Delete in live Supabase and backend
+    await deleteLiveBorrowed(id);
+  };
+
+  const [sendingEmailId, setSendingEmailId] = useState<string | null>(null);
+
+  const handleResendEmail = async (req: RoomRequest) => {
+    if (!req.id) return;
+    setSendingEmailId(req.id);
     try {
-      await fetch(`/api/borrowed/${id}`, { method: 'DELETE' });
+      const res = await fetch("/api/email/resend-alert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: req.id,
+          roomId: req.roomId,
+          items: req.items,
+          customMessage: req.customMessage
+        })
+      });
+      if (res.ok) {
+        toast.success(`Email alert dispatched for Room ${req.roomId} to staff!`);
+      } else {
+        toast.error("Failed to dispatch email alert");
+      }
     } catch (e) {
-      console.warn("Backend delete borrowed error:", e);
+      toast.error("Network error sending email");
+    } finally {
+      setSendingEmailId(null);
     }
   };
 
@@ -657,6 +694,14 @@ export default function StaffDashboard() {
                                 <td className="py-3 px-4 text-right whitespace-nowrap">
                                   <div className="inline-flex items-center gap-1.5">
                                     <button
+                                      onClick={() => handleResendEmail(req)}
+                                      disabled={sendingEmailId === req.id}
+                                      className="p-1 text-[#8C857D] hover:text-[#A68966] border border-[#E5E1DB] bg-white transition-colors"
+                                      title="Resend email alert to staff"
+                                    >
+                                      <Mail className={`w-3.5 h-3.5 ${sendingEmailId === req.id ? 'animate-pulse text-[#A68966]' : ''}`} />
+                                    </button>
+                                    <button
                                       onClick={() => handleToggleStatus(req.id!, req.status || "pending")}
                                       className="p-1 text-[#8C857D] hover:text-[#2D2926] border border-[#E5E1DB] bg-white transition-colors"
                                       title={isPending ? "Mark as Done" : "Mark as Pending"}
@@ -716,6 +761,7 @@ export default function StaffDashboard() {
                             requests={roomReqs}
                             onComplete={handleMarkCompleted}
                             onDelete={handleDelete}
+                            onResendEmail={handleResendEmail}
                             isPending={true}
                           />
                         ))}
@@ -748,6 +794,7 @@ export default function StaffDashboard() {
                             requests={roomReqs}
                             onComplete={handleMarkCompleted}
                             onDelete={handleDelete}
+                            onResendEmail={handleResendEmail}
                             isPending={false}
                           />
                         ))}
@@ -841,12 +888,14 @@ function RoomGroupCard({
   requests, 
   onComplete, 
   onDelete, 
+  onResendEmail,
   isPending 
 }: { 
   roomId: string, 
   requests: RoomRequest[], 
   onComplete: (id: string) => void, 
   onDelete: (id: string) => void,
+  onResendEmail?: (req: RoomRequest) => void,
   isPending: boolean
 }) {
   return (
@@ -892,6 +941,15 @@ function RoomGroupCard({
             </div>
 
             <div className="mt-3 flex gap-2 justify-end">
+              {onResendEmail && (
+                <button 
+                  onClick={() => onResendEmail(request)}
+                  className="p-1.5 text-[#8C857D] hover:text-[#A68966] hover:bg-[#F9F7F4] border border-[#E5E1DB] transition-colors"
+                  title="Resend email alert to staff"
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                </button>
+              )}
               {isPending && (
                 <button 
                   onClick={() => onComplete(request.id!)}

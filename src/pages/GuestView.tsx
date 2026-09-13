@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { collection, setDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
+import { getClientSupabase } from "../lib/supabaseClient";
 import { COMMON_ITEMS, DEFAULT_ROOMS, Room, getItemUnitConsumption } from "../types";
 import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
@@ -340,12 +341,20 @@ export default function GuestView() {
         sessionStorage.setItem("hues_last_req_id", reqId);
       } catch (e) {}
 
-      // 1. Instantly save to local storage cache so it appears on staff dashboard in 0ms
-      try {
-        const cached = JSON.parse(localStorage.getItem("hues_stay_requests") || "[]");
-        cached.unshift(requestData);
-        localStorage.setItem("hues_stay_requests", JSON.stringify(cached));
-      } catch (e) {}
+      // 1. Direct Supabase write (cross-device real-time sync across mobile, laptop, preview)
+      const sb = getClientSupabase();
+      if (sb) {
+        sb.from("guest_requests").upsert({
+          id: reqId,
+          room_id: String(roomNumber),
+          items: finalItems,
+          custom_message: customMessage.trim(),
+          status: "pending",
+          created_at: requestData.createdAt
+        }, { onConflict: "id" }).then(({ error }) => {
+          if (error) console.warn("[GUEST] Supabase write error:", error.message);
+        });
+      }
 
       // 2. Fire and sync Firestore write non-blockingly using canonical reqId as doc ID
       const firestoreTask = (async () => {

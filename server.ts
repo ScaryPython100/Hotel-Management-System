@@ -1,8 +1,10 @@
 import "dotenv/config";
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import {
+  getSupabase,
   saveRequestToSupabase,
   updateRequestStatusInSupabase,
   deleteRequestFromSupabase,
@@ -252,11 +254,13 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       console.warn("[SUPABASE] Background write error:", err);
     });
 
-    // Also dispatch notification email
-    sendStaffEmailAlert({
-      roomNumber: newReq.roomId,
+    // Also dispatch notification email (tracked & deduplicated)
+    dispatchStaffEmailForRequest({
+      id: newReq.id,
+      roomId: newReq.roomId,
       items: newReq.items,
-      customMessage: newReq.customMessage
+      customMessage: newReq.customMessage,
+      createdAt: newReq.createdAt
     }).catch(err => console.warn("[EMAIL] Auto-notify error:", err));
 
     res.json({ success: true, request: newReq });
@@ -536,13 +540,10 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
         }
       }
     } else if (status === "pending" && found) {
-      // If toggled back to pending, mark any active borrowed records for this request as returned
-      const toReturn = serverBorrowed.filter(b => b.requestId === found!.id && b.status === "borrowed");
-      for (const b of toReturn) {
-        b.status = "returned";
-        b.returnedAt = Date.now();
-        markBorrowedReturnedInSupabase(b.id).catch(e => console.warn("[SUPABASE] Mark returned error:", e));
-      }
+      // Note: Do not automatically mark physical appliances as returned when a request is reopened.
+      // Physical appliances in guest rooms must only be marked as returned when staff explicitly
+      // clicks "Collect & Return" after retrieving them from the room.
+      console.log(`[REQUESTS] Request ${id} toggled to pending. Keeping active borrowed appliances intact.`);
     }
 
     return res.json({ 
@@ -837,13 +838,146 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     }
   }
 
+  // File-backed tracker for emailed request IDs to avoid re-sending or duplicates
+  const EMAILED_FILE = path.join(process.cwd(), ".data", "emailed_requests.json");
+  const emailedRequestIds = new Set<string>();
+
+  function loadEmailedRequestIds() {
+    try {
+      if (fs.existsSync(EMAILED_FILE)) {
+        const content = fs.readFileSync(EMAILED_FILE, "utf-8");
+        const list = JSON.parse(content);
+        if (Array.isArray(list)) {
+          list.forEach(id => emailedRequestIds.add(String(id)));
+        }
+      }
+    } catch (err) {
+      console.warn("[EMAIL] Could not read emailed_requests.json:", err);
+    }
+  }
+
+  function saveEmailedRequestIds() {
+    try {
+      const dir = path.dirname(EMAILED_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(EMAILED_FILE, JSON.stringify(Array.from(emailedRequestIds), null, 2));
+    } catch (err) {
+      console.warn("[EMAIL] Could not write emailed_requests.json:", err);
+    }
+  }
+
+  loadEmailedRequestIds();
+
+  async function dispatchStaffEmailForRequest(req: {
+    id: string;
+    roomId: string;
+    items: string[];
+    customMessage?: string;
+    createdAt?: number;
+    forceResend?: boolean;
+  }): Promise<{ success: boolean; details?: any; error?: string }> {
+    const reqId = String(req.id || `req-${Date.now()}`);
+    if (!req.forceResend && emailedRequestIds.has(reqId)) {
+      return { success: true, details: "Already notified" };
+    }
+
+    console.log(`[EMAIL DISPATCH] Triggering notification email for request ${reqId} (Room ${req.roomId})`);
+    const result = await sendStaffEmailAlert({
+      roomNumber: req.roomId,
+      items: req.items,
+      customMessage: req.customMessage
+    });
+
+    if (result.success) {
+      emailedRequestIds.add(reqId);
+      saveEmailedRequestIds();
+      console.log(`[EMAIL DISPATCH] Successfully sent & tracked email for request ${reqId}`);
+    } else {
+      console.warn(`[EMAIL DISPATCH] Failed to send email for request ${reqId}:`, result.error);
+    }
+
+    return result;
+  }
+
+  function startEmailNotificationDaemon() {
+    console.log("[EMAIL DAEMON] Starting Supabase Realtime & Polling Email Watcher...");
+
+    const checkSupabaseForNewRequests = async () => {
+      try {
+        const sb = getSupabase();
+        if (!sb) return;
+
+        const { data, error } = await sb
+          .from("guest_requests")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(20);
+
+        if (error || !data || !Array.isArray(data)) return;
+
+        for (const row of data) {
+          const reqId = String(row.id);
+          const createdAt = Number(row.created_at) || 0;
+          // Check if created within last 24 hours and not yet emailed
+          const isRecent = (Date.now() - createdAt) < (24 * 60 * 60 * 1000);
+
+          if (!emailedRequestIds.has(reqId) && isRecent) {
+            console.log(`[EMAIL DAEMON] Found un-notified request ${reqId} for Room ${row.room_id} in Supabase!`);
+            await dispatchStaffEmailForRequest({
+              id: reqId,
+              roomId: String(row.room_id),
+              items: Array.isArray(row.items) ? row.items : [],
+              customMessage: row.custom_message || "",
+              createdAt
+            });
+          }
+        }
+      } catch (err: any) {
+        console.warn("[EMAIL DAEMON] Polling check warning:", err?.message || err);
+      }
+    };
+
+    // Run on startup
+    checkSupabaseForNewRequests();
+
+    // Fast poll every 3 seconds - catches mobile QR submissions regardless of origin
+    setInterval(checkSupabaseForNewRequests, 3000);
+
+    // Realtime subscription for instant zero-latency email dispatch
+    try {
+      const sb = getSupabase();
+      if (sb) {
+        sb.channel("server_request_email_watcher")
+          .on("postgres_changes", { event: "INSERT", schema: "public", table: "guest_requests" }, async (payload: any) => {
+            const row = payload.new;
+            if (row && row.id && !emailedRequestIds.has(String(row.id))) {
+              console.log(`[EMAIL REALTIME] Instant notification for newly inserted request ${row.id} Room ${row.room_id}`);
+              await dispatchStaffEmailForRequest({
+                id: String(row.id),
+                roomId: String(row.room_id),
+                items: Array.isArray(row.items) ? row.items : [],
+                customMessage: row.custom_message || "",
+                createdAt: Number(row.created_at) || Date.now()
+              });
+            }
+          })
+          .subscribe();
+      }
+    } catch (err: any) {
+      console.warn("[EMAIL REALTIME] Subscription error:", err?.message || err);
+    }
+  }
+
   // Webhook Endpoint for Notifications (Resend Email API notification dispatch)
   app.post("/api/notify", async (req, res) => {
-    const { roomNumber, items, customMessage } = req.body;
+    const { roomNumber, items, customMessage, id } = req.body;
     
     // Trigger email alert
-    const emailResult = await sendStaffEmailAlert({
-      roomNumber: String(roomNumber || "Unknown"),
+    const emailResult = await dispatchStaffEmailForRequest({
+      id: String(id || `notify-${Date.now()}`),
+      roomId: String(roomNumber || "Unknown"),
       items: Array.isArray(items) ? items : [],
       customMessage: customMessage || ""
     });
@@ -851,7 +985,38 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     res.json({ success: true, message: "Staff notification processed", email: emailResult });
   });
 
-  // Diagnostic Endpoint: Check email configuration
+  // Ensure request has email dispatched
+  app.post("/api/email/ensure-dispatched", async (req, res) => {
+    const { id, roomId, items, customMessage } = req.body;
+    if (!id || !roomId) {
+      return res.status(400).json({ error: "Missing id or roomId" });
+    }
+    const result = await dispatchStaffEmailForRequest({
+      id: String(id),
+      roomId: String(roomId),
+      items: Array.isArray(items) ? items : [],
+      customMessage: customMessage || ""
+    });
+    res.json(result);
+  });
+
+  // Force resend an alert for any request
+  app.post("/api/email/resend-alert", async (req, res) => {
+    const { id, roomId, items, customMessage } = req.body;
+    if (!roomId) {
+      return res.status(400).json({ error: "Missing roomId" });
+    }
+    const result = await dispatchStaffEmailForRequest({
+      id: String(id || `manual-${Date.now()}`),
+      roomId: String(roomId),
+      items: Array.isArray(items) ? items : [],
+      customMessage: customMessage || "",
+      forceResend: true
+    });
+    res.json(result);
+  });
+
+  // Diagnostic Endpoint: Check email configuration and history
   app.get("/api/email/status", (req, res) => {
     const apiKey = process.env.RESEND_API_KEY?.trim();
     const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com";
@@ -860,7 +1025,9 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     res.json({
       configured: Boolean(apiKey && apiKey.length > 5),
       recipients: toEmails,
-      from: process.env.RESEND_FROM_EMAIL || "Hues Stay Concierge <onboarding@resend.dev>"
+      from: process.env.RESEND_FROM_EMAIL || "Hues Stay Concierge <onboarding@resend.dev>",
+      emailedCount: emailedRequestIds.size,
+      recentEmailedIds: Array.from(emailedRequestIds).slice(-10)
     });
   });
 
@@ -893,6 +1060,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    startEmailNotificationDaemon();
   });
 }
 
