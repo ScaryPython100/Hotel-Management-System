@@ -25,8 +25,7 @@ import {
   Check,
   RotateCcw,
   History,
-  ArchiveRestore,
-  Mail
+  ArchiveRestore
 } from "lucide-react";
 import toast, { Toaster } from "react-hot-toast";
 
@@ -382,34 +381,6 @@ export default function StaffDashboard() {
     await deleteLiveBorrowed(id);
   };
 
-  const [sendingEmailId, setSendingEmailId] = useState<string | null>(null);
-
-  const handleResendEmail = async (req: RoomRequest) => {
-    if (!req.id) return;
-    setSendingEmailId(req.id);
-    try {
-      const res = await fetch("/api/email/resend-alert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: req.id,
-          roomId: req.roomId,
-          items: req.items,
-          customMessage: req.customMessage
-        })
-      });
-      if (res.ok) {
-        toast.success(`Email alert dispatched for Room ${req.roomId} to staff!`);
-      } else {
-        toast.error("Failed to dispatch email alert");
-      }
-    } catch (e) {
-      toast.error("Network error sending email");
-    } finally {
-      setSendingEmailId(null);
-    }
-  };
-
   const pendingRequests = requests.filter(r => r.status === "pending");
   const completedRequests = requests.filter(r => r.status === "completed");
 
@@ -694,14 +665,6 @@ export default function StaffDashboard() {
                                 <td className="py-3 px-4 text-right whitespace-nowrap">
                                   <div className="inline-flex items-center gap-1.5">
                                     <button
-                                      onClick={() => handleResendEmail(req)}
-                                      disabled={sendingEmailId === req.id}
-                                      className="p-1 text-[#8C857D] hover:text-[#A68966] border border-[#E5E1DB] bg-white transition-colors"
-                                      title="Resend email alert to staff"
-                                    >
-                                      <Mail className={`w-3.5 h-3.5 ${sendingEmailId === req.id ? 'animate-pulse text-[#A68966]' : ''}`} />
-                                    </button>
-                                    <button
                                       onClick={() => handleToggleStatus(req.id!, req.status || "pending")}
                                       className="p-1 text-[#8C857D] hover:text-[#2D2926] border border-[#E5E1DB] bg-white transition-colors"
                                       title={isPending ? "Mark as Done" : "Mark as Pending"}
@@ -761,7 +724,6 @@ export default function StaffDashboard() {
                             requests={roomReqs}
                             onComplete={handleMarkCompleted}
                             onDelete={handleDelete}
-                            onResendEmail={handleResendEmail}
                             isPending={true}
                           />
                         ))}
@@ -794,7 +756,6 @@ export default function StaffDashboard() {
                             requests={roomReqs}
                             onComplete={handleMarkCompleted}
                             onDelete={handleDelete}
-                            onResendEmail={handleResendEmail}
                             isPending={false}
                           />
                         ))}
@@ -888,14 +849,12 @@ function RoomGroupCard({
   requests, 
   onComplete, 
   onDelete, 
-  onResendEmail,
   isPending 
 }: { 
   roomId: string, 
   requests: RoomRequest[], 
   onComplete: (id: string) => void, 
   onDelete: (id: string) => void,
-  onResendEmail?: (req: RoomRequest) => void,
   isPending: boolean
 }) {
   return (
@@ -941,15 +900,6 @@ function RoomGroupCard({
             </div>
 
             <div className="mt-3 flex gap-2 justify-end">
-              {onResendEmail && (
-                <button 
-                  onClick={() => onResendEmail(request)}
-                  className="p-1.5 text-[#8C857D] hover:text-[#A68966] hover:bg-[#F9F7F4] border border-[#E5E1DB] transition-colors"
-                  title="Resend email alert to staff"
-                >
-                  <Mail className="w-3.5 h-3.5" />
-                </button>
-              )}
               {isPending && (
                 <button 
                   onClick={() => onComplete(request.id!)}

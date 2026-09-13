@@ -1000,22 +1000,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     res.json(result);
   });
 
-  // Force resend an alert for any request
-  app.post("/api/email/resend-alert", async (req, res) => {
-    const { id, roomId, items, customMessage } = req.body;
-    if (!roomId) {
-      return res.status(400).json({ error: "Missing roomId" });
-    }
-    const result = await dispatchStaffEmailForRequest({
-      id: String(id || `manual-${Date.now()}`),
-      roomId: String(roomId),
-      items: Array.isArray(items) ? items : [],
-      customMessage: customMessage || "",
-      forceResend: true
-    });
-    res.json(result);
-  });
-
   // Diagnostic Endpoint: Check email configuration and history
   app.get("/api/email/status", (req, res) => {
     const apiKey = process.env.RESEND_API_KEY?.trim();
