@@ -1034,6 +1034,15 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
   loadEmailedRequestIds();
 
+  const inFlightEmailDispatches = new Set<string>();
+  const recentFingerprints = new Map<string, number>();
+
+  function getRequestFingerprint(roomId: string, items: string[], customMessage?: string): string {
+    const sortedItems = (items || []).map(i => String(i).trim().toLowerCase()).sort().join("|");
+    const msg = (customMessage || "").trim().toLowerCase();
+    return `${String(roomId || "").trim().toLowerCase()}:::${sortedItems}:::${msg}`;
+  }
+
   async function dispatchStaffEmailForRequest(req: {
     id: string;
     roomId: string;
@@ -1057,26 +1066,55 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       return { success: true, details: "Ignored system configuration record" };
     }
 
-    if (!req.forceResend && emailedRequestIds.has(reqId)) {
-      return { success: true, details: "Already notified" };
+    // 1. Check ID-based deduplication (both completed and currently in-flight)
+    if (!req.forceResend) {
+      if (emailedRequestIds.has(reqId) || inFlightEmailDispatches.has(reqId)) {
+        console.log(`[EMAIL DISPATCH] Skipped duplicate dispatch for request ${reqId} (already emailed or in-flight)`);
+        return { success: true, details: "Already notified or dispatch in flight" };
+      }
     }
+
+    // 2. Check content-based fingerprint deduplication (prevent duplicate within 2 minutes)
+    const now = Date.now();
+    const fingerprint = getRequestFingerprint(roomIdStr, req.items, req.customMessage);
+    if (!req.forceResend) {
+      const lastSentTime = recentFingerprints.get(fingerprint);
+      if (lastSentTime && (now - lastSentTime) < 120000) { // 2 minutes window
+        console.log(`[EMAIL DISPATCH] Skipped duplicate dispatch by fingerprint for Room ${roomIdStr} (sent ${Math.round((now - lastSentTime)/1000)}s ago)`);
+        emailedRequestIds.add(reqId);
+        saveEmailedRequestIds();
+        return { success: true, details: "Identical request already notified recently" };
+      }
+    }
+
+    // LOCK IMMEDIATELY to prevent concurrent race condition between /api/requests and Supabase Realtime/polling
+    inFlightEmailDispatches.add(reqId);
+    emailedRequestIds.add(reqId);
+    recentFingerprints.set(fingerprint, now);
 
     console.log(`[EMAIL DISPATCH] Triggering notification email for request ${reqId} (Room ${req.roomId})`);
-    const result = await sendStaffEmailAlert({
-      roomNumber: req.roomId,
-      items: req.items,
-      customMessage: req.customMessage
-    });
+    try {
+      const result = await sendStaffEmailAlert({
+        roomNumber: req.roomId,
+        items: req.items,
+        customMessage: req.customMessage
+      });
 
-    if (result.success) {
-      emailedRequestIds.add(reqId);
-      saveEmailedRequestIds();
-      console.log(`[EMAIL DISPATCH] Successfully sent & tracked email for request ${reqId}`);
-    } else {
-      console.warn(`[EMAIL DISPATCH] Failed to send email for request ${reqId}:`, result.error);
+      if (result.success) {
+        saveEmailedRequestIds();
+        console.log(`[EMAIL DISPATCH] Successfully sent & tracked email for request ${reqId}`);
+      } else {
+        console.warn(`[EMAIL DISPATCH] Failed to send email for request ${reqId}:`, result.error);
+        if (result.error !== "RESEND_API_KEY not configured") {
+          emailedRequestIds.delete(reqId);
+          recentFingerprints.delete(fingerprint);
+        }
+      }
+
+      return result;
+    } finally {
+      inFlightEmailDispatches.delete(reqId);
     }
-
-    return result;
   }
 
   function startEmailNotificationDaemon() {
@@ -1109,7 +1147,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
           // Check if created within last 24 hours and not yet emailed
           const isRecent = (Date.now() - createdAt) < (24 * 60 * 60 * 1000);
 
-          if (!emailedRequestIds.has(reqId) && isRecent) {
+          if (!emailedRequestIds.has(reqId) && !inFlightEmailDispatches.has(reqId) && isRecent) {
             console.log(`[EMAIL DAEMON] Found un-notified request ${reqId} for Room ${row.room_id} in Supabase!`);
             await dispatchStaffEmailForRequest({
               id: reqId,
@@ -1148,7 +1186,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
                 return;
               }
 
-              if (!emailedRequestIds.has(reqId)) {
+              if (!emailedRequestIds.has(reqId) && !inFlightEmailDispatches.has(reqId)) {
                 console.log(`[EMAIL REALTIME] Instant notification for newly inserted request ${row.id} Room ${row.room_id}`);
                 await dispatchStaffEmailForRequest({
                   id: reqId,
