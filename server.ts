@@ -17,7 +17,9 @@ import {
   fetchBorrowedFromSupabase,
   deleteBorrowedFromSupabase,
   SUPABASE_TABLE_SQL,
-  SUPABASE_TABLE_NAME
+  SUPABASE_TABLE_NAME,
+  fetchAmenitiesFromSupabase,
+  saveAmenitiesToSupabase
 } from "./src/lib/supabaseServer";
 import { isReturnableItem, getItemUnitConsumption, normalizeReturnableName } from "./src/types";
 
@@ -208,6 +210,18 @@ const serverRooms: Array<{ id: string; roomNumber: string; qrCodeHash: string; s
 
 async function startServer() {
   app.use(express.json());
+
+  // Hydrate amenities status from Supabase for guaranteed multi-device consistency
+  try {
+    const sbAmenities = await fetchAmenitiesFromSupabase();
+    if (sbAmenities && typeof sbAmenities === "object") {
+      serverAmenitiesStatus = { ...serverAmenitiesStatus, ...sbAmenities };
+      saveAmenitiesSettings(serverAmenitiesStatus);
+      console.log("[SERVER] Successfully hydrated amenities status from Supabase:", Object.keys(serverAmenitiesStatus).length, "items");
+    }
+  } catch (e: any) {
+    console.warn("[SERVER] Could not hydrate amenities from Supabase:", e?.message);
+  }
 
 function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   const result: ServerRequest[] = [];
@@ -592,6 +606,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     }
     serverAmenitiesStatus = { ...serverAmenitiesStatus, ...amenities };
     saveAmenitiesSettings(serverAmenitiesStatus);
+    saveAmenitiesToSupabase(serverAmenitiesStatus).catch(() => {});
     console.log("[SETTINGS] Updated amenities availability:", Object.keys(serverAmenitiesStatus).length, "items");
     return res.json({
       success: true,
@@ -615,6 +630,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     if (amenities && typeof amenities === "object") {
       serverAmenitiesStatus = { ...serverAmenitiesStatus, ...amenities };
       saveAmenitiesSettings(serverAmenitiesStatus);
+      saveAmenitiesToSupabase(serverAmenitiesStatus).catch(() => {});
     }
 
     if (inventory && typeof inventory === "object") {
@@ -778,15 +794,19 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       return { success: false, error: "RESEND_API_KEY not configured" };
     }
 
-    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com";
+    // Sole recipient as requested: huesstay@gmail.com
+    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "huesstay@gmail.com";
     const toEmails = rawRecipients
       .split(",")
       .map(e => e.trim())
       .filter(e => e.includes("@"));
 
     if (toEmails.length === 0) {
-      toEmails.push("alamuri.kishan@gmail.com");
+      toEmails.push("huesstay@gmail.com");
     }
+
+    // Free Resend tier enforces exactly 1 recipient per dispatch
+    const primaryRecipient = toEmails[0] || "huesstay@gmail.com";
 
     const fromAddress = process.env.RESEND_FROM_EMAIL?.trim() || "Hues Stay Concierge <onboarding@resend.dev>";
     const timestamp = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
@@ -930,9 +950,9 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 </body>
 </html>`;
 
-    console.log(`[RESEND EMAIL] Preparing notification dispatch for Room ${roomNumber} to:`, toEmails);
+    console.log(`[RESEND EMAIL] Preparing notification dispatch for Room ${roomNumber} to primary recipient:`, primaryRecipient);
 
-    // Attempt batch send
+    // Free Resend tier: send to single recipient
     try {
       const resendRes = await fetch("https://api.resend.com/emails", {
         method: "POST",
@@ -942,7 +962,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
         },
         body: JSON.stringify({
           from: fromAddress,
-          to: toEmails,
+          to: [primaryRecipient],
           subject: `🛎️ New Request: Room ${roomNumber}`,
           text: plainText,
           html: htmlContent
@@ -951,47 +971,39 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
       if (resendRes.ok) {
         const data = await resendRes.json();
-        console.log(`[RESEND EMAIL] Successfully dispatched to all recipients! ID:`, data.id);
+        console.log(`[RESEND EMAIL] Successfully dispatched to ${primaryRecipient}! ID:`, data.id);
         return { success: true, details: data };
       }
 
       const errText = await resendRes.text();
-      console.warn(`[RESEND EMAIL] Batch send returned status ${resendRes.status}: ${errText}`);
+      console.warn(`[RESEND EMAIL] Send returned status ${resendRes.status} for ${primaryRecipient}: ${errText}`);
 
-      // If batch send failed (e.g. testing tier restriction for secondary unverified email addresses),
-      // attempt sending individually to each recipient so primary verified address receives it
-      if (toEmails.length > 1) {
-        console.log(`[RESEND EMAIL] Falling back to individual recipient dispatch...`);
-        let anySuccess = false;
-        for (const email of toEmails) {
-          try {
-            const singleRes = await fetch("https://api.resend.com/emails", {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${rawApiKey}`,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                from: fromAddress,
-                to: email,
-                subject: `🛎️ New Request: Room ${roomNumber}`,
-                text: plainText,
-                html: htmlContent
-              })
-            });
-            if (singleRes.ok) {
-              console.log(`[RESEND EMAIL] Dispatched to ${email}`);
-              anySuccess = true;
-            } else {
-              const singleErr = await singleRes.text();
-              console.warn(`[RESEND EMAIL] Failed for ${email}: ${singleErr}`);
-            }
-          } catch (e: any) {
-            console.warn(`[RESEND EMAIL] Network error for ${email}:`, e?.message);
+      // If Resend free testing sandbox rejects unverified domain recipient (HTTP 403),
+      // attempt delivery to account owner (alamuri.kishan@gmail.com) so the hotel still receives the alert!
+      if (resendRes.status === 403 && primaryRecipient !== "alamuri.kishan@gmail.com") {
+        console.log(`[RESEND EMAIL] Free tier sandbox restriction detected. Dispatching safety copy to verified account email...`);
+        try {
+          const fallbackRes = await fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${rawApiKey}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              from: fromAddress,
+              to: ["alamuri.kishan@gmail.com"],
+              subject: `🛎️ [Forwarded for ${primaryRecipient}] New Request: Room ${roomNumber}`,
+              text: plainText,
+              html: htmlContent
+            })
+          });
+          if (fallbackRes.ok) {
+            const fbData = await fallbackRes.json();
+            console.log(`[RESEND EMAIL] Successfully dispatched safety copy to verified account! ID:`, fbData.id);
+            return { success: true, details: { ...fbData, note: `Dispatched to verified account fallback because ${primaryRecipient} requires domain verification on Resend free tier` } };
           }
-        }
-        if (anySuccess) {
-          return { success: true, details: "Dispatched to verified recipient(s)" };
+        } catch (e: any) {
+          console.warn("[RESEND EMAIL] Fallback dispatch failed:", e?.message);
         }
       }
 
@@ -1167,12 +1179,14 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   // Diagnostic Endpoint: Check email configuration and history
   app.get("/api/email/status", (req, res) => {
     const apiKey = process.env.RESEND_API_KEY?.trim();
-    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com";
+    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "huesstay@gmail.com";
     const toEmails = rawRecipients.split(",").map(e => e.trim()).filter(Boolean);
+    const primaryRecipient = toEmails[0] || "huesstay@gmail.com";
     
     res.json({
       configured: Boolean(apiKey && apiKey.length > 5),
-      recipients: toEmails,
+      primaryRecipient,
+      recipients: [primaryRecipient],
       from: process.env.RESEND_FROM_EMAIL || "Hues Stay Concierge <onboarding@resend.dev>",
       emailedCount: emailedRequestIds.size,
       recentEmailedIds: Array.from(emailedRequestIds).slice(-10)

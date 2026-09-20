@@ -55,15 +55,17 @@ export default async function handler(req, res) {
   const resendApiKey = process.env.RESEND_API_KEY?.trim();
   
   if (resendApiKey) {
-    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "alamuri.kishan@gmail.com";
+    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "huesstay@gmail.com";
     const toEmails = rawRecipients
       .split(",")
       .map(e => e.trim())
       .filter(e => e.includes("@"));
 
     if (toEmails.length === 0) {
-      toEmails.push("alamuri.kishan@gmail.com");
+      toEmails.push("huesstay@gmail.com");
     }
+
+    const primaryRecipient = toEmails[0] || "huesstay@gmail.com";
 
     try {
       const resendResponse = await fetch('https://api.resend.com/emails', {
@@ -74,7 +76,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           from: fromAddress,
-          to: toEmails,
+          to: [primaryRecipient],
           subject: `🛎️ New Request: Room ${roomNumber}`,
           text: formattedMessage,
           html: `<!DOCTYPE html><html><body style="font-family:sans-serif;color:#2D2926;background:#F9F7F4;padding:24px;"><div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #E5E1DB;padding:28px;"><h2 style="margin:0 0 16px;color:#2D2926;font-size:20px;">🛎️ New Request: Room ${roomNumber}</h2><p style="margin:0 0 12px;color:#59534C;"><strong>Items Requested:</strong></p><ul style="margin:0 0 16px;padding-left:20px;color:#2D2926;">${items && items.length > 0 ? items.map((i: string) => `<li>${i}</li>`).join("") : "<li>No specific items</li>"}</ul>${customMessage ? `<p style="margin:0 0 16px;color:#59534C;"><strong>Note:</strong> ${customMessage}</p>` : ""}<div style="margin-top:24px;"><a href="https://ais-dev-6pq7a4aadlk33uog2vbo7m-437727623674.asia-southeast1.run.app/staff" style="background:#2D2926;color:#ffffff;text-decoration:none;padding:10px 20px;font-size:13px;font-weight:bold;letter-spacing:1px;display:inline-block;">OPEN STAFF DASHBOARD</a></div></div></body></html>`
@@ -83,6 +85,23 @@ export default async function handler(req, res) {
       
       if (!resendResponse.ok) {
         const errorText = await resendResponse.text();
+        if (resendResponse.status === 403 && primaryRecipient !== "alamuri.kishan@gmail.com") {
+          console.log("[RESEND Vercel] Free tier sandbox: fallback dispatching safety copy to account owner...");
+          await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${resendApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              from: fromAddress,
+              to: ["alamuri.kishan@gmail.com"],
+              subject: `🛎️ [Forwarded for ${primaryRecipient}] New Request: Room ${roomNumber}`,
+              text: formattedMessage,
+              html: `<!DOCTYPE html><html><body style="font-family:sans-serif;color:#2D2926;background:#F9F7F4;padding:24px;"><div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #E5E1DB;padding:28px;"><h2 style="margin:0 0 16px;color:#2D2926;font-size:20px;">🛎️ New Request: Room ${roomNumber}</h2><p style="margin:0 0 12px;color:#59534C;"><strong>Items Requested:</strong></p><ul style="margin:0 0 16px;padding-left:20px;color:#2D2926;">${items && items.length > 0 ? items.map((i: string) => `<li>${i}</li>`).join("") : "<li>No specific items</li>"}</ul>${customMessage ? `<p style="margin:0 0 16px;color:#59534C;"><strong>Note:</strong> ${customMessage}</p>` : ""}<div style="margin-top:24px;"><a href="https://ais-dev-6pq7a4aadlk33uog2vbo7m-437727623674.asia-southeast1.run.app/staff" style="background:#2D2926;color:#ffffff;text-decoration:none;padding:10px 20px;font-size:13px;font-weight:bold;letter-spacing:1px;display:inline-block;">OPEN STAFF DASHBOARD</a></div></div></body></html>`
+            })
+          }).catch(() => {});
+        }
         throw new Error(`Resend API returned status: ${resendResponse.status} - ${errorText}`);
       }
       

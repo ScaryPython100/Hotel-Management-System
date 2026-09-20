@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { collection, setDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { getClientSupabase } from "../lib/supabaseClient";
+import { getClientSupabase, fetchLiveAmenitiesStatus } from "../lib/supabaseClient";
 import { COMMON_ITEMS, DEFAULT_ROOMS, Room, getItemUnitConsumption, DEFAULT_AMENITY_STATUS } from "../types";
 import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
@@ -195,9 +195,18 @@ export default function GuestView() {
       }
     };
 
-    // Fetch live amenities status from API (guaranteed instant sync across mobile & desktop)
+    // Fetch live amenities status from Supabase & API (guaranteed instant sync across mobile & desktop)
     const fetchLiveAmenities = async () => {
       try {
+        const liveStatus = await fetchLiveAmenitiesStatus();
+        if (liveStatus && isMounted) {
+          setAmenitiesStatus(prev => ({ ...prev, ...liveStatus }));
+          try {
+            localStorage.setItem("hues_stay_amenities", JSON.stringify(liveStatus));
+          } catch (e) {}
+          return;
+        }
+
         const res = await fetch("/api/settings/amenities");
         if (res.ok) {
           const data = await res.json();
@@ -218,7 +227,7 @@ export default function GuestView() {
     const interval = setInterval(() => {
       fetchLiveInventory();
       fetchLiveAmenities();
-    }, 3000);
+    }, 2000);
 
     const onFocus = () => {
       fetchLiveInventory();

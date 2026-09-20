@@ -34,7 +34,11 @@ export async function fetchLiveRequests(): Promise<RoomRequest[]> {
         .order("created_at", { ascending: false });
 
       if (!error && data && Array.isArray(data)) {
-        const activeRows = data.filter((row: any) => !row.is_deleted_from_dashboard);
+        const activeRows = data.filter((row: any) => 
+          !row.is_deleted_from_dashboard && 
+          row.room_id !== "SETTINGS" && 
+          !String(row.id || "").startsWith("system-")
+        );
         return activeRows.map((row: any): RoomRequest => ({
           id: row.id,
           roomId: String(row.room_id),
@@ -252,3 +256,93 @@ export async function saveLiveBorrowed(item: BorrowedItem): Promise<boolean> {
 
   return success;
 }
+
+/**
+ * Fetch global amenities status directly from Supabase (instant cross-device sync)
+ */
+export async function fetchLiveAmenitiesStatus(): Promise<Record<string, 'available' | 'out_of_service'> | null> {
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      const { data, error } = await sb
+        .from("guest_requests")
+        .select("custom_message")
+        .eq("id", "system-amenities-settings-global")
+        .single();
+
+      if (!error && data && data.custom_message) {
+        const parsed = JSON.parse(data.custom_message);
+        if (parsed && typeof parsed === "object") {
+          return parsed;
+        }
+      }
+    } catch (err) {
+      console.warn("[CLIENT SUPABASE] Direct fetch amenities fallback to API:", err);
+    }
+  }
+
+  // Fallback to server API
+  try {
+    const res = await fetch("/api/settings/amenities");
+    if (res.ok) {
+      const json = await res.json();
+      if (json.success && json.amenities) {
+        return json.amenities;
+      }
+    }
+  } catch (err) {
+    console.warn("[API] Fetch amenities fallback error:", err);
+  }
+
+  return null;
+}
+
+/**
+ * Save global amenities status directly to Supabase + notify server API
+ */
+export async function saveLiveAmenitiesStatus(status: Record<string, 'available' | 'out_of_service'>): Promise<boolean> {
+  let success = false;
+  const sb = getClientSupabase();
+
+  if (sb) {
+    try {
+      const { error } = await sb
+        .from("guest_requests")
+        .upsert({
+          id: "system-amenities-settings-global",
+          room_id: "SETTINGS",
+          items: [],
+          custom_message: JSON.stringify(status),
+          status: "completed",
+          created_at: 0
+        }, { onConflict: "id" });
+
+      if (!error) {
+        success = true;
+      } else {
+        console.warn("[CLIENT SUPABASE] Upsert amenities error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[CLIENT SUPABASE] Save amenities exception:", err);
+    }
+  }
+
+  // Also notify server API non-blockingly to update server cache & file
+  fetch("/api/settings/amenities", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ amenities: status })
+  }).catch(() => {});
+
+  // Also sync to Firestore non-blockingly so Firestore real-time listeners trigger instantly
+  try {
+    import("./firebase").then(({ db }) => {
+      import("firebase/firestore").then(({ doc, setDoc }) => {
+        setDoc(doc(db, "settings", "amenities"), status, { merge: true }).catch(() => {});
+      });
+    }).catch(() => {});
+  } catch (e) {}
+
+  return success;
+}
+

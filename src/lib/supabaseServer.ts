@@ -210,9 +210,10 @@ export async function fetchRequestsFromSupabase(includeDeleted = false): Promise
 
     if (!data) return [];
 
-    const activeRows = includeDeleted ? data : data.filter((row: any) => !row.is_deleted_from_dashboard);
+    const filteredRows = (includeDeleted ? data : data.filter((row: any) => !row.is_deleted_from_dashboard))
+      .filter((row: any) => row.room_id !== "SETTINGS" && !String(row.id || "").startsWith("system-"));
 
-    const mapped: RequestRecord[] = activeRows.map((row: any) => ({
+    const mapped: RequestRecord[] = filteredRows.map((row: any) => ({
       id: row.id,
       roomId: row.room_id,
       items: Array.isArray(row.items) ? row.items : [],
@@ -557,3 +558,56 @@ export async function adjustInventoryTakenInSupabase(itemName: string, delta: nu
     return { success: false, error: err?.message };
   }
 }
+
+/**
+ * Fetch global amenities status from Supabase
+ */
+export async function fetchAmenitiesFromSupabase(): Promise<Record<string, 'available' | 'out_of_service'> | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .select("custom_message")
+      .eq("id", "system-amenities-settings-global")
+      .single();
+
+    if (!error && data && data.custom_message) {
+      const parsed = JSON.parse(data.custom_message);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+    }
+  } catch (err: any) {
+    console.warn("[SUPABASE] fetchAmenities error:", err?.message);
+  }
+  return null;
+}
+
+/**
+ * Save global amenities status to Supabase
+ */
+export async function saveAmenitiesToSupabase(status: Record<string, 'available' | 'out_of_service'>): Promise<boolean> {
+  const supabase = getSupabase();
+  if (!supabase) return false;
+
+  try {
+    const { error } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .upsert({
+        id: "system-amenities-settings-global",
+        room_id: "SETTINGS",
+        items: [],
+        custom_message: JSON.stringify(status),
+        status: "completed",
+        created_at: 0
+      }, { onConflict: "id" });
+
+    return !error;
+  } catch (err: any) {
+    console.warn("[SUPABASE] saveAmenities error:", err?.message);
+    return false;
+  }
+}
+

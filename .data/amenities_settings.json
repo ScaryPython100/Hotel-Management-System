@@ -1,18 +1,18 @@
 {
-  "Soap Refill": "available",
-  "Shampoo Refill": "available",
+  "Soap Refill": "out_of_service",
+  "Shampoo Refill": "out_of_service",
   "Hand wash Refill": "available",
   "Wifi Password Request": "available",
   "Extend the Stay (Inform Supervisor via Call)": "available",
   "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)": "available",
-  "Water Bottle (Paid)": "out_of_service",
+  "Water Bottle (Paid)": "available",
   "Laundry wash assistance (Paid, self responsibility)": "available",
   "Iron Box": "available",
   "Teakettle": "available",
-  "Hair Dryer": "out_of_service",
-  "Laptop Table": "out_of_service",
-  "Leg Massager (Paid)": "out_of_service",
-  "Glasses (Set of 2)": "out_of_service",
-  "USB 2.0 Adaptor + Cable": "out_of_service",
-  "USB 3.0 Adaptor + Cable": "out_of_service"
+  "Hair Dryer": "available",
+  "Laptop Table": "available",
+  "Leg Massager (Paid)": "available",
+  "Glasses (Set of 2)": "available",
+  "USB 2.0 Adaptor + Cable": "available",
+  "USB 3.0 Adaptor + Cable": "available"
 }

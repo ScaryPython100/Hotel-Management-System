@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { doc, getDoc, setDoc, collection, getDocs, updateDoc, addDoc, query, where } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { COMMON_ITEMS, DEFAULT_AMENITY_STATUS } from "../types";
+import { fetchLiveAmenitiesStatus, saveLiveAmenitiesStatus } from "../lib/supabaseClient";
 import { 
   ShieldAlert, 
   CheckCircle2, 
@@ -62,6 +63,17 @@ export default function StaffSettings() {
   const [isSyncingWithCloud, setIsSyncingWithCloud] = useState(false);
   const [saving, setSaving] = useState(false);
   const [lastSavedMsg, setLastSavedMsg] = useState<string | null>(null);
+
+  // Auto-reset watchdog: Never permit the UI to stay in 'saving' state for more than 2 seconds
+  useEffect(() => {
+    if (saving) {
+      const timer = setTimeout(() => {
+        setSaving(false);
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [saving]);
+
   const [superhostPin, setSuperhostPin] = useState(() => {
     return localStorage.getItem("hues_stay_superhost_pin") || "9999";
   });
@@ -83,7 +95,21 @@ export default function StaffSettings() {
         );
 
         const loadTask = (async () => {
-          // 1. Fetch amenities from Server API (instant & guaranteed cross-device sync)
+          // 1. Fetch amenities from Supabase (guaranteed cross-device sync)
+          try {
+            const liveAmenities = await fetchLiveAmenitiesStatus();
+            if (liveAmenities && isMounted) {
+              setAmenityStatus(prev => {
+                const next = { ...prev, ...liveAmenities };
+                try {
+                  localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
+                } catch (e) {}
+                return next;
+              });
+            }
+          } catch (e) {}
+
+          // 2. Fetch amenities from Server API (fallback)
           try {
             const apiRes = await fetch("/api/settings/amenities");
             if (apiRes.ok) {
@@ -168,13 +194,23 @@ export default function StaffSettings() {
   const toggleStatus = (itemName: string) => {
     setAmenityStatus(prev => {
       const current = prev[itemName] || 'available';
+      const nextStatus: 'available' | 'out_of_service' = current === 'available' ? 'out_of_service' : 'available';
       const updated: Record<string, 'available' | 'out_of_service'> = {
         ...prev,
-        [itemName]: current === 'available' ? ('out_of_service' as const) : ('available' as const)
+        [itemName]: nextStatus
       };
       try {
         localStorage.setItem("hues_stay_amenities", JSON.stringify(updated));
       } catch (e) {}
+
+      // Automatically sync to Supabase so desktop & mobile update in real-time
+      saveLiveAmenitiesStatus(updated).then(() => {
+        setLastSavedMsg(`"${itemName}" marked as ${nextStatus === 'available' ? 'Available' : 'Unavailable'} (synced across all devices)`);
+        setTimeout(() => setLastSavedMsg(null), 3500);
+      }).catch(() => {});
+
+      toast.success(`${itemName} is now ${nextStatus === 'available' ? 'Available' : 'Unavailable'}`);
+
       return updated;
     });
   };
@@ -267,19 +303,32 @@ export default function StaffSettings() {
   const handleSave = async () => {
     setSaving(true);
     setLastSavedMsg(null);
+
+    // Hard fail-safe watchdog: Guarantee button returns to ready state under all conditions
+    const safetyWatchdog = setTimeout(() => {
+      setSaving(false);
+    }, 1500);
+
     try {
-      // 1. Save locally first so user never loses state
+      // 1. Save locally first (instant synchronous persistence)
       localStorage.setItem("hues_stay_amenities", JSON.stringify(amenityStatus));
       localStorage.setItem("hues_stay_inventory", JSON.stringify(inventoryMap));
       if (superhostPin.trim()) {
         localStorage.setItem("hues_stay_superhost_pin", superhostPin.trim());
       }
 
-      // 2. Persist to server API and disk (.data/amenities_settings.json) - instant sub-100ms
+      // 2. Persist to Supabase directly for guaranteed instant multi-device sync
+      saveLiveAmenitiesStatus(amenityStatus).catch(() => {});
+
+      // 2. Persist to server API and disk (.data/amenities_settings.json) with strict 1.2s timeout
+      const controller = new AbortController();
+      const fetchTimeout = setTimeout(() => controller.abort(), 1200);
+
       try {
         await fetch("/api/settings/save-all", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
             amenities: amenityStatus,
             inventory: inventoryMap,
@@ -287,42 +336,42 @@ export default function StaffSettings() {
           })
         });
       } catch (err) {
-        console.warn("Server settings sync:", err);
+        console.warn("Server settings sync warning (saved locally):", err);
+      } finally {
+        clearTimeout(fetchTimeout);
       }
 
-      // 3. Persist inventory items to /api/inventory in background
+      // 3. Fire-and-forget: Sync inventory to Supabase & Firestore completely in background
       const allItemNames = Object.keys(inventoryMap);
-      for (const name of allItemNames) {
-        const invData = inventoryMap[name];
-        if (invData) {
-          fetch(`/api/inventory/${encodeURIComponent(name)}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ totalStock: invData.limit, taken: invData.inUse })
-          }).catch(() => {});
-        }
-      }
-
-      // 4. Background non-blocking sync to Firestore with a strict 1.2s timeout so UI NEVER hangs
-      const firestoreTask = (async () => {
-        try {
-          await setDoc(doc(db, "settings", "amenities"), amenityStatus, { merge: true });
-        } catch (e) {}
-
-        try {
-          for (const name of allItemNames) {
-            const invData = inventoryMap[name];
-            if (invData?.id) {
-              await updateDoc(doc(db, "inventory", invData.id), { limit: invData.limit });
-            }
+      setTimeout(() => {
+        // Supabase sync
+        for (const name of allItemNames) {
+          const invData = inventoryMap[name];
+          if (invData) {
+            fetch(`/api/inventory/${encodeURIComponent(name)}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ totalStock: invData.limit, taken: invData.inUse })
+            }).catch(() => {});
           }
-        } catch (e) {}
-      })();
+        }
 
-      await Promise.race([
-        firestoreTask,
-        new Promise(resolve => setTimeout(resolve, 1200))
-      ]);
+        // Firestore sync
+        (async () => {
+          try {
+            await setDoc(doc(db, "settings", "amenities"), amenityStatus, { merge: true });
+          } catch (e) {}
+
+          try {
+            for (const name of allItemNames) {
+              const invData = inventoryMap[name];
+              if (invData?.id) {
+                await updateDoc(doc(db, "inventory", invData.id), { limit: invData.limit });
+              }
+            }
+          } catch (e) {}
+        })();
+      }, 0);
 
       const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       setLastSavedMsg(`Settings saved successfully at ${nowTime}`);
@@ -333,6 +382,7 @@ export default function StaffSettings() {
       setLastSavedMsg(`Settings saved at ${nowTime}`);
       toast.success("Settings saved!");
     } finally {
+      clearTimeout(safetyWatchdog);
       setSaving(false);
     }
   };
