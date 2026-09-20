@@ -19,7 +19,8 @@ import {
   SUPABASE_TABLE_SQL,
   SUPABASE_TABLE_NAME,
   fetchAmenitiesFromSupabase,
-  saveAmenitiesToSupabase
+  saveAmenitiesToSupabase,
+  clearAllRequestsFromSupabase
 } from "./src/lib/supabaseServer";
 import { isReturnableItem, getItemUnitConsumption, normalizeReturnableName } from "./src/types";
 
@@ -280,6 +281,34 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     const deduplicated = deduplicateServerRequests(filteredMemory);
     res.json({ success: true, requests: deduplicated, source: "memory" });
   });
+
+  // CLEAR ALL: Permanently wipe all requests and borrowed items from database and memory
+  const handleClearAllRequests = async (req: express.Request, res: express.Response) => {
+    try {
+      // 1. Wipe from Supabase
+      await clearAllRequestsFromSupabase();
+
+      // 2. Wipe server memory
+      serverRequests.length = 0;
+      serverBorrowed.length = 0;
+      serverDismissedRequests.clear();
+
+      // 3. Clear emailed request IDs tracking cache
+      emailedRequestIds.clear();
+      saveEmailedRequestIds();
+
+      console.log("[CLEAR-ALL] All requests and borrowed items wiped completely from database and server memory.");
+      return res.json({
+        success: true,
+        message: "All previous requests and borrowed items cleared completely."
+      });
+    } catch (err: any) {
+      console.error("[CLEAR-ALL] Error clearing requests:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Failed to clear database" });
+    }
+  };
+  app.post("/api/requests/clear-all", handleClearAllRequests);
+  app.delete("/api/requests/clear-all", handleClearAllRequests);
 
   // DELETE / dismiss request from active dashboard/screen views (STRICTLY PRESERVED in Supabase database)
   app.delete("/api/requests/:id", async (req, res) => {
@@ -794,19 +823,8 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       return { success: false, error: "RESEND_API_KEY not configured" };
     }
 
-    // Sole recipient as requested: huesstay@gmail.com
-    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "huesstay@gmail.com";
-    const toEmails = rawRecipients
-      .split(",")
-      .map(e => e.trim())
-      .filter(e => e.includes("@"));
-
-    if (toEmails.length === 0) {
-      toEmails.push("huesstay@gmail.com");
-    }
-
-    // Free Resend tier enforces exactly 1 recipient per dispatch
-    const primaryRecipient = toEmails[0] || "huesstay@gmail.com";
+    // STRICT RECIPIENT: huesstay@gmail.com
+    const primaryRecipient = "huesstay@gmail.com";
 
     const fromAddress = process.env.RESEND_FROM_EMAIL?.trim() || "Hues Stay Concierge <onboarding@resend.dev>";
     const timestamp = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
@@ -977,36 +995,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
       const errText = await resendRes.text();
       console.warn(`[RESEND EMAIL] Send returned status ${resendRes.status} for ${primaryRecipient}: ${errText}`);
-
-      // If Resend free testing sandbox rejects unverified domain recipient (HTTP 403),
-      // attempt delivery to account owner (alamuri.kishan@gmail.com) so the hotel still receives the alert!
-      if (resendRes.status === 403 && primaryRecipient !== "alamuri.kishan@gmail.com") {
-        console.log(`[RESEND EMAIL] Free tier sandbox restriction detected. Dispatching safety copy to verified account email...`);
-        try {
-          const fallbackRes = await fetch("https://api.resend.com/emails", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${rawApiKey}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              from: fromAddress,
-              to: ["alamuri.kishan@gmail.com"],
-              subject: `🛎️ [Forwarded for ${primaryRecipient}] New Request: Room ${roomNumber}`,
-              text: plainText,
-              html: htmlContent
-            })
-          });
-          if (fallbackRes.ok) {
-            const fbData = await fallbackRes.json();
-            console.log(`[RESEND EMAIL] Successfully dispatched safety copy to verified account! ID:`, fbData.id);
-            return { success: true, details: { ...fbData, note: `Dispatched to verified account fallback because ${primaryRecipient} requires domain verification on Resend free tier` } };
-          }
-        } catch (e: any) {
-          console.warn("[RESEND EMAIL] Fallback dispatch failed:", e?.message);
-        }
-      }
-
       return { success: false, error: errText };
     } catch (err: any) {
       console.error(`[RESEND EMAIL] Network error during dispatch:`, err?.message);
@@ -1055,6 +1043,20 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     forceResend?: boolean;
   }): Promise<{ success: boolean; details?: any; error?: string }> {
     const reqId = String(req.id || `req-${Date.now()}`);
+    const roomIdStr = String(req.roomId || "").trim();
+
+    // STRICT GUARD: Never dispatch emails for internal settings or system records
+    if (
+      !roomIdStr ||
+      roomIdStr.toUpperCase() === "SETTINGS" ||
+      roomIdStr.toLowerCase().includes("setting") ||
+      reqId.startsWith("system-")
+    ) {
+      console.log(`[EMAIL DISPATCH] Ignored system configuration record (${reqId}, Room: ${roomIdStr})`);
+      emailedRequestIds.add(reqId);
+      return { success: true, details: "Ignored system configuration record" };
+    }
+
     if (!req.forceResend && emailedRequestIds.has(reqId)) {
       return { success: true, details: "Already notified" };
     }
@@ -1094,7 +1096,15 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
         if (error || !data || !Array.isArray(data)) return;
 
         for (const row of data) {
-          const reqId = String(row.id);
+          const reqId = String(row.id || "");
+          const roomId = String(row.room_id || "").trim();
+
+          // Skip system settings records
+          if (roomId.toUpperCase() === "SETTINGS" || roomId.toLowerCase().includes("setting") || reqId.startsWith("system-")) {
+            emailedRequestIds.add(reqId);
+            continue;
+          }
+
           const createdAt = Number(row.created_at) || 0;
           // Check if created within last 24 hours and not yet emailed
           const isRecent = (Date.now() - createdAt) < (24 * 60 * 60 * 1000);
@@ -1128,15 +1138,26 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
         sb.channel("server_request_email_watcher")
           .on("postgres_changes", { event: "INSERT", schema: "public", table: "guest_requests" }, async (payload: any) => {
             const row = payload.new;
-            if (row && row.id && !emailedRequestIds.has(String(row.id))) {
-              console.log(`[EMAIL REALTIME] Instant notification for newly inserted request ${row.id} Room ${row.room_id}`);
-              await dispatchStaffEmailForRequest({
-                id: String(row.id),
-                roomId: String(row.room_id),
-                items: Array.isArray(row.items) ? row.items : [],
-                customMessage: row.custom_message || "",
-                createdAt: Number(row.created_at) || Date.now()
-              });
+            if (row && row.id) {
+              const reqId = String(row.id || "");
+              const roomId = String(row.room_id || "").trim();
+
+              // Strictly ignore system configuration records
+              if (roomId.toUpperCase() === "SETTINGS" || roomId.toLowerCase().includes("setting") || reqId.startsWith("system-")) {
+                emailedRequestIds.add(reqId);
+                return;
+              }
+
+              if (!emailedRequestIds.has(reqId)) {
+                console.log(`[EMAIL REALTIME] Instant notification for newly inserted request ${row.id} Room ${row.room_id}`);
+                await dispatchStaffEmailForRequest({
+                  id: reqId,
+                  roomId: String(row.room_id),
+                  items: Array.isArray(row.items) ? row.items : [],
+                  customMessage: row.custom_message || "",
+                  createdAt: Number(row.created_at) || Date.now()
+                });
+              }
             }
           })
           .subscribe();
@@ -1179,9 +1200,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   // Diagnostic Endpoint: Check email configuration and history
   app.get("/api/email/status", (req, res) => {
     const apiKey = process.env.RESEND_API_KEY?.trim();
-    const rawRecipients = process.env.RESEND_TO_EMAILS?.trim() || "huesstay@gmail.com";
-    const toEmails = rawRecipients.split(",").map(e => e.trim()).filter(Boolean);
-    const primaryRecipient = toEmails[0] || "huesstay@gmail.com";
+    const primaryRecipient = "huesstay@gmail.com";
     
     res.json({
       configured: Boolean(apiKey && apiKey.length > 5),

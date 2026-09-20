@@ -19,14 +19,16 @@ export default async function handler(req: any, res: any) {
         return res.status(200).json({ success: true, requests: [], source: "fallback" });
       }
       const data = await response.json();
-      const mapped = data.map((r: any) => ({
-        id: r.id,
-        roomId: r.room_id,
-        items: Array.isArray(r.items) ? r.items : [],
-        customMessage: r.custom_message || "",
-        status: r.status || "pending",
-        createdAt: Number(r.created_at) || Date.now()
-      }));
+      const mapped = (Array.isArray(data) ? data : [])
+        .filter((r: any) => r.room_id !== "SETTINGS" && !String(r.id || "").startsWith("system-"))
+        .map((r: any) => ({
+          id: r.id,
+          roomId: r.room_id,
+          items: Array.isArray(r.items) ? r.items : [],
+          customMessage: r.custom_message || "",
+          status: r.status || "pending",
+          createdAt: Number(r.created_at) || Date.now()
+        }));
       return res.status(200).json({ success: true, requests: mapped, source: "supabase" });
     } catch (e: any) {
       return res.status(200).json({ success: true, requests: [], error: e?.message });

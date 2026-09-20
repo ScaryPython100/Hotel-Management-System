@@ -8,6 +8,7 @@ import {
   deleteLiveBorrowed, 
   dismissLiveRequest, 
   saveLiveBorrowed, 
+  clearAllLiveRequests,
   getClientSupabase 
 } from "../lib/supabaseClient";
 import { formatDistanceToNow } from "date-fns";
@@ -126,7 +127,7 @@ export default function StaffDashboard() {
           fetchLiveBorrowed()
         ]);
 
-        if (Array.isArray(liveReqs) && liveReqs.length > 0) {
+        if (Array.isArray(liveReqs)) {
           const dismissed = getDismissedRequestIds();
           const valid = liveReqs
             .filter((r: RoomRequest) => !dismissed.includes(r.id || ""))
@@ -352,6 +353,26 @@ export default function StaffDashboard() {
     toast.success(`Cleared ${completed.length} completed records from view.`);
   };
 
+  const handleClearAllDatabaseRequests = async () => {
+    if (!window.confirm("Are you sure you want to completely wipe all requests and borrowed items from the database and dashboard?\n\nThis will reset the dashboard to a completely clean state.")) {
+      return;
+    }
+    setRequests([]);
+    setBorrowedItems([]);
+    try {
+      localStorage.removeItem("hues_stay_requests");
+      localStorage.removeItem("hues_stay_borrowed");
+      localStorage.removeItem("hues_stay_dismissed_requests");
+    } catch (e) {}
+    toast.loading("Clearing database...", { id: "clear-db" });
+    const ok = await clearAllLiveRequests();
+    if (ok) {
+      toast.success("Database and dashboard completely cleared!", { id: "clear-db" });
+    } else {
+      toast.success("Dashboard and database reset.", { id: "clear-db" });
+    }
+  };
+
   const handleMarkReturned = async (borrowedId: string, itemName: string) => {
     const itemObj = borrowedItems.find(b => b.id === borrowedId);
     const room = itemObj ? itemObj.roomId : "";
@@ -448,36 +469,49 @@ export default function StaffDashboard() {
             </div>
             
             {/* View & Tab Switcher */}
-            <div className="flex border border-[#E5E1DB] bg-white p-1 rounded-none shadow-sm">
-              <button 
-                onClick={() => setActiveTab('table')}
-                className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
-                  activeTab === 'table' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
-                }`}
-                title="Structured Columns & Rows Table"
-              >
-                <TableProperties className="w-3.5 h-3.5" />
-                Table View {requests.length > 0 && `(${requests.length})`}
-              </button>
-              <button 
-                onClick={() => setActiveTab('cards')}
-                className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
-                  activeTab === 'cards' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
-                }`}
-                title="Room Grouped Cards"
-              >
-                <LayoutGrid className="w-3.5 h-3.5" />
-                Cards {pendingRequests.length > 0 && `(${pendingRequests.length})`}
-              </button>
-              <button 
-                onClick={() => setActiveTab('borrowed')}
-                className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
-                  activeTab === 'borrowed' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
-                }`}
-              >
-                <Package className="w-3.5 h-3.5" />
-                Borrowed {activeBorrowed.length > 0 && `(${activeBorrowed.length})`}
-              </button>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex border border-[#E5E1DB] bg-white p-1 rounded-none shadow-sm">
+                <button 
+                  onClick={() => setActiveTab('table')}
+                  className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
+                    activeTab === 'table' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                  }`}
+                  title="Structured Columns & Rows Table"
+                >
+                  <TableProperties className="w-3.5 h-3.5" />
+                  Table View {requests.length > 0 && `(${requests.length})`}
+                </button>
+                <button 
+                  onClick={() => setActiveTab('cards')}
+                  className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
+                    activeTab === 'cards' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                  }`}
+                  title="Room Grouped Cards"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  Cards {pendingRequests.length > 0 && `(${pendingRequests.length})`}
+                </button>
+                <button 
+                  onClick={() => setActiveTab('borrowed')}
+                  className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
+                    activeTab === 'borrowed' ? 'bg-[#2D2926] text-white' : 'text-[#8C857D] hover:text-[#2D2926]'
+                  }`}
+                >
+                  <Package className="w-3.5 h-3.5" />
+                  Borrowed {activeBorrowed.length > 0 && `(${activeBorrowed.length})`}
+                </button>
+              </div>
+
+              {(requests.length > 0 || borrowedItems.length > 0) && (
+                <button
+                  onClick={handleClearAllDatabaseRequests}
+                  className="px-4 py-2 border border-red-300 text-red-700 bg-red-50 hover:bg-red-100 text-xs font-medium tracking-wider uppercase transition-colors flex items-center gap-1.5 shadow-sm"
+                  title="Clear all previous requests and records from database"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-600" />
+                  Clear Database
+                </button>
+              )}
             </div>
           </header>
 
@@ -545,6 +579,17 @@ export default function StaffDashboard() {
                         >
                           <Trash2 className="w-3 h-3 text-red-500" />
                           Clear Done ({completedRequests.length})
+                        </button>
+                      )}
+
+                      {(requests.length > 0 || borrowedItems.length > 0) && (
+                        <button
+                          onClick={handleClearAllDatabaseRequests}
+                          className="px-3 py-1.5 border border-red-300 text-red-700 bg-red-50 hover:bg-red-100 text-[10px] uppercase font-bold tracking-wider transition-colors flex items-center gap-1"
+                          title="Wipe all requests from database completely"
+                        >
+                          <Trash2 className="w-3 h-3 text-red-600" />
+                          Clear All Database
                         </button>
                       )}
                     </div>

@@ -257,6 +257,32 @@ export async function fetchRequestsFromSupabase(includeDeleted = false): Promise
 }
 
 /**
+ * Permanently delete all guest requests and borrowed items from Supabase (preserves SETTINGS configuration)
+ */
+export async function clearAllRequestsFromSupabase(): Promise<boolean> {
+  const supabase = getSupabase();
+  if (!supabase) return false;
+  try {
+    const { error: e1 } = await supabase
+      .from(SUPABASE_TABLE_NAME)
+      .delete()
+      .neq("room_id", "SETTINGS");
+    if (e1) console.warn("[SUPABASE] Delete requests error:", e1.message);
+
+    const { error: e2 } = await supabase
+      .from(SUPABASE_BORROWED_TABLE)
+      .delete()
+      .neq("id", "none_placeholder_never_matches");
+    if (e2) console.warn("[SUPABASE] Delete borrowed error:", e2.message);
+
+    return !e1 && !e2;
+  } catch (err: any) {
+    console.warn("[SUPABASE] Clear all requests exception:", err?.message || err);
+    return false;
+  }
+}
+
+/**
  * Check connection status and whether the guest_requests table exists
  */
 export async function getSupabaseStatus(): Promise<{

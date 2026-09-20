@@ -346,3 +346,26 @@ export async function saveLiveAmenitiesStatus(status: Record<string, 'available'
   return success;
 }
 
+/**
+ * Permanently clear all requests and borrowed items from Supabase, server API, and local state
+ */
+export async function clearAllLiveRequests(): Promise<boolean> {
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      await sb.from("guest_requests").delete().neq("room_id", "SETTINGS");
+      await sb.from("borrowed_items").delete().neq("id", "none_placeholder_never_matches");
+    } catch (e) {
+      console.warn("[CLIENT SUPABASE] Clear error:", e);
+    }
+  }
+
+  try {
+    const res = await fetch("/api/requests/clear-all", { method: "POST" });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+
