@@ -45,6 +45,25 @@ export const COMMON_ITEMS: AmenityItem[] = [
   { name: "USB 3.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 }
 ];
 
+export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_service'> = {
+  "Soap Refill": "available",
+  "Shampoo Refill": "available",
+  "Hand wash Refill": "available",
+  "Wifi Password Request": "available",
+  "Extend the Stay (Inform Supervisor via Call)": "available",
+  "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)": "available",
+  "Water Bottle (Paid)": "out_of_service",
+  "Laundry wash assistance (Paid, self responsibility)": "available",
+  "Iron Box": "available",
+  "Teakettle": "available",
+  "Hair Dryer": "out_of_service",
+  "Laptop Table": "out_of_service",
+  "Leg Massager (Paid)": "out_of_service",
+  "Glasses (Set of 2)": "out_of_service",
+  "USB 2.0 Adaptor + Cable": "out_of_service",
+  "USB 3.0 Adaptor + Cable": "out_of_service"
+};
+
 export interface InventoryItem {
   id?: string;
   name: string;

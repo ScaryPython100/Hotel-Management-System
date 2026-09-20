@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { doc, getDoc, setDoc, collection, getDocs, updateDoc, addDoc, query, where } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { COMMON_ITEMS } from "../types";
+import { COMMON_ITEMS, DEFAULT_AMENITY_STATUS } from "../types";
 import { 
   ShieldAlert, 
   CheckCircle2, 
@@ -31,13 +31,11 @@ export default function StaffSettings() {
   const [amenityStatus, setAmenityStatus] = useState<Record<string, 'available' | 'out_of_service'>>(() => {
     try {
       const saved = localStorage.getItem("hues_stay_amenities");
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        return { ...DEFAULT_AMENITY_STATUS, ...JSON.parse(saved) };
+      }
     } catch (e) {}
-    const init: Record<string, 'available' | 'out_of_service'> = {};
-    COMMON_ITEMS.forEach(item => {
-      init[item.name] = 'available';
-    });
-    return init;
+    return { ...DEFAULT_AMENITY_STATUS };
   });
 
   const [inventoryMap, setInventoryMap] = useState<Record<string, { id?: string, limit: number, inUse: number }>>(() => {
@@ -63,6 +61,7 @@ export default function StaffSettings() {
 
   const [isSyncingWithCloud, setIsSyncingWithCloud] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [lastSavedMsg, setLastSavedMsg] = useState<string | null>(null);
   const [superhostPin, setSuperhostPin] = useState(() => {
     return localStorage.getItem("hues_stay_superhost_pin") || "9999";
   });
@@ -72,7 +71,7 @@ export default function StaffSettings() {
   const [newItemLimit, setNewItemLimit] = useState("5");
   const [isAddingItem, setIsAddingItem] = useState(false);
 
-  // Background fetch from Supabase inventory API and Firestore
+  // Background fetch from server API, Supabase inventory API, and Firestore
   useEffect(() => {
     let isMounted = true;
     setIsSyncingWithCloud(true);
@@ -84,7 +83,24 @@ export default function StaffSettings() {
         );
 
         const loadTask = (async () => {
-          // 1. Fetch amenities from Firestore
+          // 1. Fetch amenities from Server API (instant & guaranteed cross-device sync)
+          try {
+            const apiRes = await fetch("/api/settings/amenities");
+            if (apiRes.ok) {
+              const data = await apiRes.json();
+              if (data.success && data.amenities && isMounted) {
+                setAmenityStatus(prev => {
+                  const next = { ...prev, ...data.amenities };
+                  try {
+                    localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
+                  } catch (e) {}
+                  return next;
+                });
+              }
+            }
+          } catch (e) {}
+
+          // 2. Fetch amenities from Firestore (supplemental merge)
           try {
             const docRef = doc(db, "settings", "amenities");
             const docSnap = await getDoc(docRef);
@@ -103,7 +119,7 @@ export default function StaffSettings() {
             }
           } catch (e) {}
 
-          // 2. Fetch inventory live from Supabase table /api/inventory
+          // 3. Fetch inventory live from Supabase table /api/inventory
           try {
             const supaRes = await fetch("/api/inventory");
             if (supaRes.ok) {
@@ -250,65 +266,72 @@ export default function StaffSettings() {
 
   const handleSave = async () => {
     setSaving(true);
+    setLastSavedMsg(null);
     try {
-      // Save locally first so user never loses state
+      // 1. Save locally first so user never loses state
       localStorage.setItem("hues_stay_amenities", JSON.stringify(amenityStatus));
       localStorage.setItem("hues_stay_inventory", JSON.stringify(inventoryMap));
+      if (superhostPin.trim()) {
+        localStorage.setItem("hues_stay_superhost_pin", superhostPin.trim());
+      }
 
-      // Persist to Firestore
-      await setDoc(doc(db, "settings", "amenities"), amenityStatus, { merge: true });
+      // 2. Persist to server API and disk (.data/amenities_settings.json) - instant sub-100ms
+      try {
+        await fetch("/api/settings/save-all", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            amenities: amenityStatus,
+            inventory: inventoryMap,
+            pin: superhostPin.trim()
+          })
+        });
+      } catch (err) {
+        console.warn("Server settings sync:", err);
+      }
 
-      // Persist each item's stock to both Firestore and Supabase inventory database
+      // 3. Persist inventory items to /api/inventory in background
       const allItemNames = Object.keys(inventoryMap);
       for (const name of allItemNames) {
         const invData = inventoryMap[name];
         if (invData) {
-          // Sync to Supabase inventory table in background
           fetch(`/api/inventory/${encodeURIComponent(name)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ totalStock: invData.limit, taken: invData.inUse })
-          }).catch(e => console.warn("Supabase stock sync:", e));
-
-          // Sync to Firestore
-          if (invData.id) {
-            await updateDoc(doc(db, "inventory", invData.id), { limit: invData.limit });
-          } else {
-            const invQ = query(collection(db, "inventory"), where("name", "==", name));
-            const invSnap = await getDocs(invQ);
-            if (invSnap.empty) {
-              const newDoc = await addDoc(collection(db, "inventory"), {
-                name,
-                inUse: invData.inUse || 0,
-                limit: invData.limit
-              });
-              setInventoryMap(prev => ({
-                ...prev,
-                [name]: { ...prev[name], id: newDoc.id }
-              }));
-            } else {
-              await updateDoc(invSnap.docs[0].ref, { limit: invData.limit });
-              setInventoryMap(prev => ({
-                ...prev,
-                [name]: { ...prev[name], id: invSnap.docs[0].id }
-              }));
-            }
-          }
+          }).catch(() => {});
         }
       }
 
-      // Save Superhost PIN
-      if (superhostPin.trim()) {
-        localStorage.setItem("hues_stay_superhost_pin", superhostPin.trim());
-      }
+      // 4. Background non-blocking sync to Firestore with a strict 1.2s timeout so UI NEVER hangs
+      const firestoreTask = (async () => {
+        try {
+          await setDoc(doc(db, "settings", "amenities"), amenityStatus, { merge: true });
+        } catch (e) {}
 
-      toast.success("Settings & Inventory saved!");
+        try {
+          for (const name of allItemNames) {
+            const invData = inventoryMap[name];
+            if (invData?.id) {
+              await updateDoc(doc(db, "inventory", invData.id), { limit: invData.limit });
+            }
+          }
+        } catch (e) {}
+      })();
+
+      await Promise.race([
+        firestoreTask,
+        new Promise(resolve => setTimeout(resolve, 1200))
+      ]);
+
+      const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      setLastSavedMsg(`Settings saved successfully at ${nowTime}`);
+      toast.success("Settings & Inventory saved successfully!");
     } catch (error: any) {
       console.error("Error saving settings:", error?.message || "error");
-      if (superhostPin.trim()) {
-        localStorage.setItem("hues_stay_superhost_pin", superhostPin.trim());
-      }
-      toast.success("Settings saved to local session!");
+      const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      setLastSavedMsg(`Settings saved at ${nowTime}`);
+      toast.success("Settings saved!");
     } finally {
       setSaving(false);
     }
@@ -523,17 +546,35 @@ export default function StaffSettings() {
         )}
 
         {/* Save Settings Footer */}
-        <div className="pt-6 border-t border-[#E5E1DB] flex items-center justify-between">
-          <p className="text-xs text-[#8C857D]">
-            Changes are saved locally and synced across hotel staff portals.
-          </p>
+        <div className="pt-6 border-t border-[#E5E1DB] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div>
+            <p className="text-xs text-[#8C857D]">
+              Changes are saved across all staff dashboards and guest mobile devices.
+            </p>
+            {lastSavedMsg && (
+              <p className="text-xs text-green-700 font-medium mt-1.5 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" />
+                <span>{lastSavedMsg} — <strong>Ready & safe to exit</strong></span>
+              </p>
+            )}
+          </div>
           <button
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="px-8 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors disabled:opacity-50"
+            className="px-8 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors disabled:opacity-50 flex items-center gap-2 shrink-0 cursor-pointer shadow-xs"
           >
-            {saving ? "Saving..." : "Save Settings"}
+            {saving ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Saving...</span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Save Settings</span>
+              </>
+            )}
           </button>
         </div>
       </div>

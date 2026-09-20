@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { collection, setDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { getClientSupabase } from "../lib/supabaseClient";
-import { COMMON_ITEMS, DEFAULT_ROOMS, Room, getItemUnitConsumption } from "../types";
+import { COMMON_ITEMS, DEFAULT_ROOMS, Room, getItemUnitConsumption, DEFAULT_AMENITY_STATUS } from "../types";
 import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
 import { Check, Loader2, Info, ArrowRight, BedDouble, Trash2 } from "lucide-react";
@@ -79,13 +79,11 @@ export default function GuestView() {
   const [amenitiesStatus, setAmenitiesStatus] = useState<Record<string, 'available' | 'out_of_service'>>(() => {
     try {
       const saved = localStorage.getItem("hues_stay_amenities");
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        return { ...DEFAULT_AMENITY_STATUS, ...JSON.parse(saved) };
+      }
     } catch (e) {}
-    const init: Record<string, 'available' | 'out_of_service'> = {};
-    COMMON_ITEMS.forEach(item => {
-      init[item.name] = 'available';
-    });
-    return init;
+    return { ...DEFAULT_AMENITY_STATUS };
   });
 
   // Background room verification with strict 800ms timeout
@@ -197,12 +195,40 @@ export default function GuestView() {
       }
     };
 
-    fetchLiveInventory();
-    const interval = setInterval(fetchLiveInventory, 3000);
+    // Fetch live amenities status from API (guaranteed instant sync across mobile & desktop)
+    const fetchLiveAmenities = async () => {
+      try {
+        const res = await fetch("/api/settings/amenities");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.amenities && isMounted) {
+            setAmenitiesStatus(prev => ({ ...prev, ...data.amenities }));
+            try {
+              localStorage.setItem("hues_stay_amenities", JSON.stringify(data.amenities));
+            } catch (e) {}
+          }
+        }
+      } catch (err) {
+        console.warn("Amenities fetch note:", err);
+      }
+    };
 
-    const onFocus = () => fetchLiveInventory();
+    fetchLiveInventory();
+    fetchLiveAmenities();
+    const interval = setInterval(() => {
+      fetchLiveInventory();
+      fetchLiveAmenities();
+    }, 3000);
+
+    const onFocus = () => {
+      fetchLiveInventory();
+      fetchLiveAmenities();
+    };
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") fetchLiveInventory();
+      if (document.visibilityState === "visible") {
+        fetchLiveInventory();
+        fetchLiveAmenities();
+      }
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -251,6 +277,23 @@ export default function GuestView() {
     };
   }, []);
 
+  const checkIsItemOutOfService = (item: string): boolean => {
+    if (amenitiesStatus[item] === 'out_of_service') return true;
+    const lower = item.toLowerCase().trim();
+    if (lower.includes("glass")) {
+      if (amenitiesStatus["Glasses (Set of 2)"] === 'out_of_service' || amenitiesStatus["Glasses"] === 'out_of_service') return true;
+    }
+    if (lower.includes("kettle") || lower.includes("teakettle")) {
+      if (amenitiesStatus["Teakettle"] === 'out_of_service' || amenitiesStatus["Kettle"] === 'out_of_service') return true;
+    }
+    for (const [key, val] of Object.entries(amenitiesStatus)) {
+      if (val === 'out_of_service' && (key.toLowerCase().trim() === lower || lower.includes(key.toLowerCase().trim()))) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   // Automatically unselect any item if all units are taken while guest has the page open
   useEffect(() => {
     setSelectedItems(prev => {
@@ -260,7 +303,7 @@ export default function GuestView() {
         const availableUnits = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
         const isLimited = COMMON_ITEMS.find(i => i.name === item)?.isLimited ?? (inv !== undefined);
         const isOutOfStock = isLimited && inv && (availableUnits < neededUnits);
-        const isOutOfService = amenitiesStatus[item] === 'out_of_service';
+        const isOutOfService = checkIsItemOutOfService(item);
         return isOutOfStock || isOutOfService;
       });
 
@@ -302,6 +345,14 @@ export default function GuestView() {
     setIsSubmitting(true);
 
     try {
+      // Verify no selected item is currently out of service
+      const outOfServiceSelected = selectedItems.filter(item => checkIsItemOutOfService(item));
+      if (outOfServiceSelected.length > 0) {
+        toast.error(`${outOfServiceSelected.join(", ")} ${outOfServiceSelected.length > 1 ? 'are' : 'is'} currently unavailable. Please remove from your selection.`);
+        setIsSubmitting(false);
+        return;
+      }
+
       // Find requested items that are limited
       const limitedItemsRequested = selectedItems.filter(item => {
         const staticItem = COMMON_ITEMS.find(i => i.name === item);
@@ -562,7 +613,7 @@ export default function GuestView() {
               {COMMON_ITEMS.filter(i => i.category === 'Service').map((itemObj) => {
                 const item = itemObj.name;
                 const isSelected = selectedItems.includes(item);
-                const isOutOfService = amenitiesStatus[item] === 'out_of_service';
+                const isOutOfService = checkIsItemOutOfService(item);
                 const isDisabled = isOutOfService;
 
                 return (
@@ -629,7 +680,7 @@ export default function GuestView() {
                   const neededUnits = getItemUnitConsumption(item);
                   const availableUnits = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
                   const isOutOfStock = (itemObj.isLimited || inv !== undefined) && inv && (availableUnits < neededUnits);
-                  const isOutOfService = amenitiesStatus[item] === 'out_of_service';
+                  const isOutOfService = checkIsItemOutOfService(item);
                   const isDisabled = isOutOfStock || isOutOfService;
 
                   return (

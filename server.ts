@@ -53,17 +53,91 @@ const serverRequests: ServerRequest[] = [];
 const serverBorrowed: BorrowedRecord[] = [];
 const serverDismissedRequests = new Set<string>();
 
-// Canonical inventory stock limits (stored in-memory on server, synced across all clients)
-const serverInventoryLimits: Record<string, number> = {
-  "Iron Box": 5,
-  "Teakettle": 5,
-  "Hair Dryer": 2,
-  "Laptop Table": 2,
-  "Leg Massager (Paid)": 1,
-  "Glasses (Set of 2)": 10,
-  "USB 2.0 Adaptor + Cable": 2,
-  "USB 3.0 Adaptor + Cable": 2
+// Data directory & files for durable persistence across restarts and devices
+const DATA_DIR = path.join(process.cwd(), ".data");
+const AMENITIES_FILE = path.join(DATA_DIR, "amenities_settings.json");
+const INVENTORY_LIMITS_FILE = path.join(DATA_DIR, "inventory_limits.json");
+
+// Default availability based on hotel amenities
+const DEFAULT_AMENITIES_STATUS: Record<string, 'available' | 'out_of_service'> = {
+  "Soap Refill": "available",
+  "Shampoo Refill": "available",
+  "Hand wash Refill": "available",
+  "Wifi Password Request": "available",
+  "Extend the Stay (Inform Supervisor via Call)": "available",
+  "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)": "available",
+  "Water Bottle (Paid)": "out_of_service",
+  "Laundry wash assistance (Paid, self responsibility)": "available",
+  "Iron Box": "available",
+  "Teakettle": "available",
+  "Hair Dryer": "out_of_service",
+  "Laptop Table": "out_of_service",
+  "Leg Massager (Paid)": "out_of_service",
+  "Glasses (Set of 2)": "out_of_service",
+  "USB 2.0 Adaptor + Cable": "out_of_service",
+  "USB 3.0 Adaptor + Cable": "out_of_service"
 };
+
+function loadAmenitiesSettings(): Record<string, 'available' | 'out_of_service'> {
+  try {
+    if (fs.existsSync(AMENITIES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(AMENITIES_FILE, "utf-8"));
+      if (data && typeof data === "object") {
+        return { ...DEFAULT_AMENITIES_STATUS, ...data };
+      }
+    }
+  } catch (e) {
+    console.warn("Failed to read amenities_settings.json:", e);
+  }
+  return { ...DEFAULT_AMENITIES_STATUS };
+}
+
+function saveAmenitiesSettings(settings: Record<string, 'available' | 'out_of_service'>) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(AMENITIES_FILE, JSON.stringify(settings, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Failed to write amenities_settings.json:", e);
+  }
+}
+
+let serverAmenitiesStatus: Record<string, 'available' | 'out_of_service'> = loadAmenitiesSettings();
+
+function loadInventoryLimits(): Record<string, number> {
+  const defaults: Record<string, number> = {
+    "Iron Box": 5,
+    "Teakettle": 5,
+    "Hair Dryer": 2,
+    "Laptop Table": 2,
+    "Leg Massager (Paid)": 1,
+    "Glasses (Set of 2)": 10,
+    "USB 2.0 Adaptor + Cable": 2,
+    "USB 3.0 Adaptor + Cable": 2
+  };
+  try {
+    if (fs.existsSync(INVENTORY_LIMITS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(INVENTORY_LIMITS_FILE, "utf-8"));
+      if (data && typeof data === "object") {
+        return { ...defaults, ...data };
+      }
+    }
+  } catch (e) {}
+  return defaults;
+}
+
+function saveInventoryLimits(limits: Record<string, number>) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(INVENTORY_LIMITS_FILE, JSON.stringify(limits, null, 2), "utf-8");
+  } catch (e) {}
+}
+
+// Canonical inventory stock limits (stored in-memory on server, synced across all clients)
+const serverInventoryLimits: Record<string, number> = loadInventoryLimits();
 
 function calculateItemTaken(itemName: string): number {
   const clean = itemName.toLowerCase().trim();
@@ -245,6 +319,29 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
     if (existingReq) {
       return res.json({ success: true, request: existingReq, isDuplicate: true });
+    }
+
+    // Check if any requested item is currently marked out_of_service
+    const unavailableItems = newReq.items.filter(item => {
+      const clean = String(item).toLowerCase().trim();
+      for (const [name, status] of Object.entries(serverAmenitiesStatus)) {
+        if (status === 'out_of_service') {
+          const lowerName = name.toLowerCase().trim();
+          if (lowerName === clean || clean.includes(lowerName) || lowerName.includes(clean)) {
+            return true;
+          }
+          if (clean.includes("glass") && lowerName.includes("glass")) return true;
+          if ((clean.includes("kettle") || clean.includes("teakettle")) && (lowerName.includes("kettle") || lowerName.includes("teakettle"))) return true;
+        }
+      }
+      return false;
+    });
+
+    if (unavailableItems.length > 0 && !newReq.customMessage) {
+      return res.status(400).json({
+        success: false,
+        error: `${unavailableItems.join(", ")} is currently unavailable and cannot be requested.`
+      });
     }
 
     serverRequests.unshift(newReq);
@@ -439,6 +536,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     const clean = name.trim();
     const stockNum = Math.max(1, parseInt(totalStock, 10) || 1);
     serverInventoryLimits[clean] = stockNum;
+    saveInventoryLimits(serverInventoryLimits);
 
     return res.json({
       success: true,
@@ -461,6 +559,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     const { totalStock, limit } = req.body;
     const stockNum = Math.max(1, parseInt(totalStock || limit, 10) || 1);
     serverInventoryLimits[decodedName] = stockNum;
+    saveInventoryLimits(serverInventoryLimits);
 
     return res.json({
       success: true,
@@ -470,6 +569,71 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       taken: calculateItemTaken(decodedName),
       inUse: calculateItemTaken(decodedName),
       available: Math.max(0, stockNum - calculateItemTaken(decodedName))
+    });
+  });
+
+  // ============================================
+  // SETTINGS & AMENITIES AVAILABILITY ENDPOINTS
+  // ============================================
+
+  // GET live amenities availability (accessible by both desktop & mobile instant sync)
+  app.get("/api/settings/amenities", (req, res) => {
+    return res.json({
+      success: true,
+      amenities: serverAmenitiesStatus
+    });
+  });
+
+  // POST update amenities availability
+  app.post("/api/settings/amenities", (req, res) => {
+    const { amenities } = req.body;
+    if (!amenities || typeof amenities !== "object") {
+      return res.status(400).json({ success: false, error: "Invalid amenities data" });
+    }
+    serverAmenitiesStatus = { ...serverAmenitiesStatus, ...amenities };
+    saveAmenitiesSettings(serverAmenitiesStatus);
+    console.log("[SETTINGS] Updated amenities availability:", Object.keys(serverAmenitiesStatus).length, "items");
+    return res.json({
+      success: true,
+      amenities: serverAmenitiesStatus
+    });
+  });
+
+  // GET combined settings (amenities, inventory limits)
+  app.get("/api/settings", (req, res) => {
+    return res.json({
+      success: true,
+      amenities: serverAmenitiesStatus,
+      inventoryLimits: serverInventoryLimits
+    });
+  });
+
+  // POST save-all settings (instant sub-100ms response so Staff never hangs)
+  app.post("/api/settings/save-all", (req, res) => {
+    const { amenities, inventory } = req.body;
+
+    if (amenities && typeof amenities === "object") {
+      serverAmenitiesStatus = { ...serverAmenitiesStatus, ...amenities };
+      saveAmenitiesSettings(serverAmenitiesStatus);
+    }
+
+    if (inventory && typeof inventory === "object") {
+      for (const [name, data] of Object.entries(inventory)) {
+        const limit = (data as any)?.limit ?? (data as any)?.totalStock;
+        if (typeof limit === "number") {
+          serverInventoryLimits[name] = limit;
+        }
+      }
+      saveInventoryLimits(serverInventoryLimits);
+    }
+
+    console.log("[SETTINGS] Saved all settings successfully to disk and server memory");
+    return res.json({
+      success: true,
+      message: "Settings saved successfully",
+      amenities: serverAmenitiesStatus,
+      inventory: serverInventoryLimits,
+      savedAt: Date.now()
     });
   });
 
