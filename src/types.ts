@@ -25,43 +25,43 @@ export interface AmenityItem {
 
 export const COMMON_ITEMS: AmenityItem[] = [
   // Services
+  { name: "Wifi Password (HuesStay123@)", category: "Service" },
+  { name: "Supervisor Contact Number (8431995152)", category: "Service" },
   { name: "Soap Refill", category: "Service" },
   { name: "Shampoo Refill", category: "Service" },
   { name: "Hand wash Refill", category: "Service" },
-  { name: "Wifi Password Request", category: "Service" },
-  { name: "Extend the Stay (Inform Supervisor via Call)", category: "Service" },
+  { name: "Stay Extension", category: "Service" },
   { name: "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)", category: "Service" },
   { name: "Water Bottle (Paid)", category: "Service" },
-  { name: "Laundry wash assistance (Paid, self responsibility)", category: "Service" },
   
   // Items (Inventory)
   { name: "Iron Box", isLimited: true, category: "Item", defaultLimit: 5, unitMultiplier: 1 },
-  { name: "Teakettle", isLimited: true, category: "Item", defaultLimit: 5, unitMultiplier: 1 },
+  { name: "Kettle", isLimited: true, category: "Item", defaultLimit: 5, unitMultiplier: 1 },
   { name: "Hair Dryer", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
   { name: "Laptop Table", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
   { name: "Leg Massager (Paid)", isLimited: true, category: "Item", defaultLimit: 1, unitMultiplier: 1 },
   { name: "Glasses (Set of 2)", isLimited: true, category: "Item", defaultLimit: 10, unitMultiplier: 2 },
-  { name: "USB 2.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
-  { name: "USB 3.0 Adaptor + Cable", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 }
+  { name: "USB 3.0 Cable + Adaptor", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
+  { name: "Infrared Heat Therapy Lamp (Paid)", isLimited: true, category: "Item", defaultLimit: 1, unitMultiplier: 1 }
 ];
 
 export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_service'> = {
+  "Wifi Password (HuesStay123@)": "available",
+  "Supervisor Contact Number (8431995152)": "available",
   "Soap Refill": "out_of_service",
   "Shampoo Refill": "out_of_service",
   "Hand wash Refill": "available",
-  "Wifi Password Request": "available",
-  "Extend the Stay (Inform Supervisor via Call)": "available",
+  "Stay Extension": "available",
   "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)": "available",
   "Water Bottle (Paid)": "available",
-  "Laundry wash assistance (Paid, self responsibility)": "available",
   "Iron Box": "available",
-  "Teakettle": "available",
+  "Kettle": "available",
   "Hair Dryer": "available",
   "Laptop Table": "available",
   "Leg Massager (Paid)": "available",
   "Glasses (Set of 2)": "available",
-  "USB 2.0 Adaptor + Cable": "available",
-  "USB 3.0 Adaptor + Cable": "available"
+  "USB 3.0 Cable + Adaptor": "available",
+  "Infrared Heat Therapy Lamp (Paid)": "available"
 };
 
 export interface InventoryItem {
@@ -107,15 +107,14 @@ export function getItemUnitConsumption(itemName: string): number {
 export function normalizeReturnableName(rawName: string): string {
   const base = extractBaseItemName(rawName).trim();
   const lower = base.toLowerCase();
-  if (lower.includes("teakettle") || lower.includes("kettle")) return "Teakettle";
+  if (lower.includes("kettle") || lower.includes("teakettle")) return "Kettle";
   if (lower.includes("iron")) return "Iron Box";
   if (lower.includes("hair dryer") || lower.includes("dryer")) return "Hair Dryer";
   if (lower.includes("laptop")) return "Laptop Table";
   if (lower.includes("massager")) return "Leg Massager (Paid)";
   if (lower.includes("glass")) return "Glasses (Set of 2)";
-  if (lower.includes("usb 2")) return "USB 2.0 Adaptor + Cable";
-  if (lower.includes("usb 3")) return "USB 3.0 Adaptor + Cable";
-  if (lower.includes("usb") || lower.includes("adaptor") || lower.includes("cable")) return "USB Adaptor + Cable";
+  if (lower.includes("usb") || lower.includes("cable") || lower.includes("adaptor")) return "USB 3.0 Cable + Adaptor";
+  if (lower.includes("infrared") || lower.includes("therapy lamp") || lower.includes("heat therapy")) return "Infrared Heat Therapy Lamp (Paid)";
   return base;
 }
 
@@ -126,7 +125,7 @@ export function isReturnableItem(name: string): boolean {
   // Explicit non-returnables (consumables, one-way supplies, and services)
   const nonReturnableKeywords = [
     'water bottle', 'bottle', 'plastic', 'soap', 'shampoo', 
-    'hand wash', 'refill', 'wifi', 'extend', 'laundry', 
+    'hand wash', 'refill', 'wifi', 'extend', 'stay extension', 'supervisor', 'contact', 
     'housekeeping', 'room service', 'tea bag', 'coffee', 'sugar'
   ];
   if (nonReturnableKeywords.some(kw => clean.includes(kw))) {
@@ -134,7 +133,6 @@ export function isReturnableItem(name: string): boolean {
   }
 
   // Explicit tracked borrowed appliances & durable goods:
-  // Teakettle, Iron Box, Leg Massager, Laptop Table, Glasses, USB Adaptor and Cable, Hair Dryer
   if (
     clean.includes('kettle') || 
     clean.includes('teakettle') ||
@@ -147,7 +145,10 @@ export function isReturnableItem(name: string): boolean {
     clean.includes('cable') ||
     clean.includes('usb') ||
     clean.includes('hair dryer') ||
-    clean.includes('dryer')
+    clean.includes('dryer') ||
+    clean.includes('infrared') ||
+    clean.includes('lamp') ||
+    clean.includes('heat therapy')
   ) {
     return true;
   }

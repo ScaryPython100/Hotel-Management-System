@@ -63,29 +63,38 @@ const INVENTORY_LIMITS_FILE = path.join(DATA_DIR, "inventory_limits.json");
 
 // Default availability based on hotel amenities
 const DEFAULT_AMENITIES_STATUS: Record<string, 'available' | 'out_of_service'> = {
-  "Soap Refill": "available",
-  "Shampoo Refill": "available",
+  "Wifi Password (HuesStay123@)": "available",
+  "Supervisor Contact Number (8431995152)": "available",
+  "Soap Refill": "out_of_service",
+  "Shampoo Refill": "out_of_service",
   "Hand wash Refill": "available",
-  "Wifi Password Request": "available",
-  "Extend the Stay (Inform Supervisor via Call)": "available",
+  "Stay Extension": "available",
   "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)": "available",
-  "Water Bottle (Paid)": "out_of_service",
-  "Laundry wash assistance (Paid, self responsibility)": "available",
+  "Water Bottle (Paid)": "available",
   "Iron Box": "available",
-  "Teakettle": "available",
-  "Hair Dryer": "out_of_service",
-  "Laptop Table": "out_of_service",
-  "Leg Massager (Paid)": "out_of_service",
-  "Glasses (Set of 2)": "out_of_service",
-  "USB 2.0 Adaptor + Cable": "out_of_service",
-  "USB 3.0 Adaptor + Cable": "out_of_service"
+  "Kettle": "available",
+  "Hair Dryer": "available",
+  "Laptop Table": "available",
+  "Leg Massager (Paid)": "available",
+  "Glasses (Set of 2)": "available",
+  "USB 3.0 Cable + Adaptor": "available",
+  "Infrared Heat Therapy Lamp (Paid)": "available"
 };
 
 function loadAmenitiesSettings(): Record<string, 'available' | 'out_of_service'> {
   try {
     if (fs.existsSync(AMENITIES_FILE)) {
-      const data = JSON.parse(fs.readFileSync(AMENITIES_FILE, "utf-8"));
+      let content = fs.readFileSync(AMENITIES_FILE, "utf-8");
+      // Strip single line comments if any exist in the JSON file
+      content = content.replace(/\/\/.*$/gm, "");
+      const data = JSON.parse(content);
       if (data && typeof data === "object") {
+        delete data["Teakettle"];
+        delete data["USB 2.0 Adaptor + Cable"];
+        delete data["USB 3.0 Adaptor + Cable"];
+        delete data["Laundry wash assistance (Paid, self responsibility)"];
+        delete data["Extend the Stay (Inform Supervisor via Call)"];
+        delete data["Wifi Password Request"];
         return { ...DEFAULT_AMENITIES_STATUS, ...data };
       }
     }
@@ -111,13 +120,13 @@ let serverAmenitiesStatus: Record<string, 'available' | 'out_of_service'> = load
 function loadInventoryLimits(): Record<string, number> {
   const defaults: Record<string, number> = {
     "Iron Box": 5,
-    "Teakettle": 5,
+    "Kettle": 5,
     "Hair Dryer": 2,
     "Laptop Table": 2,
     "Leg Massager (Paid)": 1,
     "Glasses (Set of 2)": 10,
-    "USB 2.0 Adaptor + Cable": 2,
-    "USB 3.0 Adaptor + Cable": 2
+    "USB 3.0 Cable + Adaptor": 2,
+    "Infrared Heat Therapy Lamp (Paid)": 1
   };
   try {
     if (fs.existsSync(INVENTORY_LIMITS_FILE)) {

@@ -19,7 +19,17 @@ function isCorruptOrDuplicateItem(name: string): boolean {
   if (lower.includes("(qty:") || lower.includes("qty:") || /\(\d+x?\)/.test(lower) || /x\s*\d+$/.test(lower)) {
     return true;
   }
-  if (lower === "kettle" || lower === "glasses" || lower === "water glasses" || lower === "water glass") {
+  if (
+    lower === "teakettle" || 
+    lower === "glasses" || 
+    lower === "water glasses" || 
+    lower === "water glass" || 
+    lower.includes("usb 2") ||
+    lower === "usb 3.0 adaptor + cable" ||
+    lower.includes("laundry") ||
+    lower === "wifi password request" ||
+    lower.includes("extend the stay")
+  ) {
     return true;
   }
   return false;
@@ -33,7 +43,14 @@ export default function StaffSettings() {
     try {
       const saved = localStorage.getItem("hues_stay_amenities");
       if (saved) {
-        return { ...DEFAULT_AMENITY_STATUS, ...JSON.parse(saved) };
+        const parsed = JSON.parse(saved);
+        const cleaned: Record<string, 'available' | 'out_of_service'> = { ...DEFAULT_AMENITY_STATUS };
+        Object.keys(parsed).forEach(k => {
+          if (!isCorruptOrDuplicateItem(k)) {
+            cleaned[k] = parsed[k];
+          }
+        });
+        return cleaned;
       }
     } catch (e) {}
     return { ...DEFAULT_AMENITY_STATUS };
@@ -100,7 +117,12 @@ export default function StaffSettings() {
             const liveAmenities = await fetchLiveAmenitiesStatus();
             if (liveAmenities && isMounted) {
               setAmenityStatus(prev => {
-                const next = { ...prev, ...liveAmenities };
+                const next = { ...prev };
+                Object.keys(liveAmenities).forEach(k => {
+                  if (!isCorruptOrDuplicateItem(k)) {
+                    next[k] = liveAmenities[k];
+                  }
+                });
                 try {
                   localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
                 } catch (e) {}
@@ -116,7 +138,12 @@ export default function StaffSettings() {
               const data = await apiRes.json();
               if (data.success && data.amenities && isMounted) {
                 setAmenityStatus(prev => {
-                  const next = { ...prev, ...data.amenities };
+                  const next = { ...prev };
+                  Object.keys(data.amenities).forEach(k => {
+                    if (!isCorruptOrDuplicateItem(k)) {
+                      next[k] = data.amenities[k];
+                    }
+                  });
                   try {
                     localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
                   } catch (e) {}

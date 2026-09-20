@@ -79,14 +79,16 @@ function deduplicateRequests(reqList: RoomRequest[]): RoomRequest[] {
 function normalizeApplianceName(name: string): string {
   const lower = (name || "").toLowerCase().trim();
   if (lower.includes("glass")) return "Glasses (Set of 2)";
-  if (lower.includes("kettle") || lower.includes("teakettle")) return "Teakettle";
+  if (lower.includes("kettle") || lower.includes("teakettle")) return "Kettle";
   if (lower.includes("iron")) return "Iron Box";
   if (lower.includes("dryer")) return "Hair Dryer";
   if (lower.includes("laptop")) return "Laptop Table";
   if (lower.includes("massager")) return "Leg Massager (Paid)";
-  if (lower.includes("adaptor") || lower.includes("cable")) {
-    if (lower.includes("3.0")) return "USB 3.0 Adaptor + Cable";
-    return "USB 2.0 Adaptor + Cable";
+  if (lower.includes("adaptor") || lower.includes("cable") || lower.includes("usb")) {
+    return "USB 3.0 Cable + Adaptor";
+  }
+  if (lower.includes("infrared") || lower.includes("lamp") || lower.includes("heat therapy")) {
+    return "Infrared Heat Therapy Lamp (Paid)";
   }
   return name.trim();
 }
