@@ -41,10 +41,11 @@ export default async function handler(req: any, res: any) {
 
   // POST new request to Supabase
   if (req.method === 'POST') {
-    const { roomId, items, customMessage, status, createdAt, id: providedId } = req.body;
+    const { roomId, roomNumber, room_id, items, customMessage, status, createdAt, id: providedId } = req.body || {};
+    const resolvedRoomId = String(roomId || roomNumber || room_id || "Unknown");
     const newReq = {
       id: providedId || `srv-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-      room_id: String(roomId || "Unknown"),
+      room_id: resolvedRoomId,
       items: Array.isArray(items) ? items : [],
       custom_message: customMessage || "",
       status: status || "pending",
