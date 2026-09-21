@@ -617,14 +617,25 @@ export default function GuestView() {
               Requested Items
             </span>
             <ul className="space-y-1.5 text-sm text-[#2D2926]">
-              {selectedItems.map(item => (
-                <li key={item} className="flex justify-between items-center py-1 border-b border-[#F2EFE9] last:border-0">
-                  <span className="font-serif">{item}</span>
-                  <span className="font-mono text-xs text-[#A68966] bg-[#FAF8F5] px-2 py-0.5 border border-[#EBE7E1] rounded-xs">
-                    Requested
-                  </span>
-                </li>
-              ))}
+              {selectedItems.map(item => {
+                const comingSoonItems = [
+                  "Laptop Table",
+                  "Hair Dryer",
+                  "Leg Massager (Paid)",
+                  "Infrared Heat Therapy Lamp (Paid)",
+                  "Glasses (Set of 2)"
+                ];
+                const displayName = comingSoonItems.includes(item) ? `${item} (Coming Soon)` : item;
+                
+                return (
+                  <li key={item} className="flex justify-between items-center py-1 border-b border-[#F2EFE9] last:border-0">
+                    <span className="font-serif">{displayName}</span>
+                    <span className="font-mono text-xs text-[#A68966] bg-[#FAF8F5] px-2 py-0.5 border border-[#EBE7E1] rounded-xs">
+                      Requested
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
@@ -736,6 +747,17 @@ export default function GuestView() {
                   ...COMMON_ITEMS.filter(i => i.category === 'Item').map(i => ({ name: i.name, isLimited: !!i.isLimited }))
                 ];
                 Object.keys(inventory).forEach(invName => {
+                  // Filter out duplicate aliases and corrupt data from showing up in the UI
+                  const lower = invName.toLowerCase().trim();
+                  if (
+                    lower === "teakettle" || 
+                    lower === "glasses" || 
+                    lower === "water glasses" || 
+                    lower === "water glass" ||
+                    lower.includes("(qty:") ||
+                    lower.includes("qty:")
+                  ) return;
+
                   if (!itemsList.some(i => i.name === invName)) {
                     itemsList.push({ name: invName, isLimited: true });
                   }
@@ -751,12 +773,22 @@ export default function GuestView() {
                   const isOutOfService = checkIsItemOutOfService(item);
                   const isDisabled = isOutOfStock || isOutOfService;
 
+                  const comingSoonItems = [
+                    "Laptop Table",
+                    "Hair Dryer",
+                    "Leg Massager (Paid)",
+                    "Infrared Heat Therapy Lamp (Paid)",
+                    "Glasses (Set of 2)"
+                  ];
+                  const isComingSoon = comingSoonItems.includes(item);
+                  const displayName = isComingSoon ? `${item} (Coming Soon)` : item;
+
                   return (
                     <div
                       key={item}
                       onClick={() => {
                         if (isDisabled) {
-                          toast.error(`${item} is currently unavailable.`);
+                          toast.error(`${displayName} is currently unavailable.`);
                           return;
                         }
                         toggleItem(item);
@@ -772,7 +804,7 @@ export default function GuestView() {
                       )}
                     >
                       <div className="flex justify-between items-start w-full gap-2">
-                        <span className="font-serif text-base md:text-lg leading-tight block">{item}</span>
+                        <span className="font-serif text-base md:text-lg leading-tight block">{displayName}</span>
                         <div
                           className={cn(
                             "w-5 h-5 flex items-center justify-center shrink-0 border rounded-xs mt-0.5 transition-colors",
