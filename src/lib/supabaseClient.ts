@@ -428,9 +428,61 @@ export async function saveLiveInventoryLimits(limits: Record<string, number>): P
 }
 
 /**
+ * Fetch list of items automatically depleted by inventory
+ */
+export async function fetchLiveAutoDepleted(): Promise<string[]> {
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      const { data, error } = await sb
+        .from("guest_requests")
+        .select("custom_message")
+        .eq("id", "system-auto-depleted-items")
+        .single();
+      if (!error && data && data.custom_message) {
+        const parsed = JSON.parse(data.custom_message);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {}
+  }
+  try {
+    const saved = localStorage.getItem("hues_stay_auto_depleted");
+    if (saved) return JSON.parse(saved);
+  } catch (e) {}
+  return [];
+}
+
+/**
+ * Save list of items automatically depleted by inventory
+ */
+export async function saveLiveAutoDepleted(items: string[]): Promise<boolean> {
+  try {
+    localStorage.setItem("hues_stay_auto_depleted", JSON.stringify(items));
+  } catch (e) {}
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      await sb
+        .from("guest_requests")
+        .upsert({
+          id: "system-auto-depleted-items",
+          room_id: "SETTINGS",
+          items: [],
+          custom_message: JSON.stringify(items),
+          status: "completed",
+          created_at: 0
+        }, { onConflict: "id" });
+      return true;
+    } catch (e) {}
+  }
+  return false;
+}
+
+/**
  * Synchronize amenity availability for the 8 target items based on live inventory limits and active in-use items.
  * An item automatically becomes 'out_of_service' when active borrowed items + pending requests >= inventory limit.
- * It automatically returns to 'available' when items are returned and in-use < inventory limit.
+ * It automatically returns to 'available' when items are returned ONLY IF it was automatically depleted.
+ * Manual settings by the owner/staff are NEVER overwritten.
  */
 export async function syncInventoryAvailability(
   borrowedList?: BorrowedItem[],
@@ -488,8 +540,13 @@ export async function syncInventoryAvailability(
     Object.assign(currentStatus, liveStatus);
   }
 
-  // 5. Evaluate availability strictly for the 8 target items
+  // 5. Fetch auto-depleted items (items marked out of service strictly by inventory limit)
+  const autoDepleted = await fetchLiveAutoDepleted();
+  const autoDepletedSet = new Set<string>(autoDepleted);
+
+  // 6. Evaluate availability strictly for the 8 target items
   let hasChanged = false;
+  let autoDepletedChanged = false;
   const updatedStatus = { ...currentStatus };
 
   for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
@@ -506,16 +563,30 @@ export async function syncInventoryAvailability(
         updatedStatus[itemKey] = "out_of_service";
         hasChanged = true;
       }
+      if (!autoDepletedSet.has(itemKey)) {
+        autoDepletedSet.add(itemKey);
+        autoDepletedChanged = true;
+      }
     } else {
-      // If inUse < limit and it was out_of_service, mark it available again
-      if (updatedStatus[itemKey] === "out_of_service") {
-        updatedStatus[itemKey] = "available";
-        hasChanged = true;
+      // In stock (inUse < limit):
+      // ONLY restore to 'available' if the system previously auto-depleted it!
+      // If the owner manually chose 'out_of_service' in Settings, NEVER touch it!
+      if (autoDepletedSet.has(itemKey)) {
+        autoDepletedSet.delete(itemKey);
+        autoDepletedChanged = true;
+        if (updatedStatus[itemKey] !== "available") {
+          updatedStatus[itemKey] = "available";
+          hasChanged = true;
+        }
       }
     }
   }
 
-  // 6. If any status changed, update localStorage and Supabase immediately
+  if (autoDepletedChanged) {
+    saveLiveAutoDepleted(Array.from(autoDepletedSet)).catch(() => {});
+  }
+
+  // 7. If any status changed, update localStorage and Supabase immediately
   if (hasChanged) {
     try {
       localStorage.setItem("hues_stay_amenities", JSON.stringify(updatedStatus));

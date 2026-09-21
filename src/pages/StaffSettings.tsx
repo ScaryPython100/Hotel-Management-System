@@ -7,6 +7,8 @@ import {
   saveLiveAmenitiesStatus, 
   fetchLiveInventoryLimits, 
   saveLiveInventoryLimits, 
+  fetchLiveAutoDepleted,
+  saveLiveAutoDepleted,
   syncInventoryAvailability 
 } from "../lib/supabaseClient";
 import { 
@@ -119,9 +121,11 @@ export default function StaffSettings() {
 
         const loadTask = (async () => {
           // 1. Fetch amenities from Supabase (guaranteed cross-device sync)
+          let liveAmenitiesFetched = false;
           try {
             const liveAmenities = await fetchLiveAmenitiesStatus();
-            if (liveAmenities && isMounted) {
+            if (liveAmenities && Object.keys(liveAmenities).length > 0 && isMounted) {
+              liveAmenitiesFetched = true;
               setAmenityStatus(prev => {
                 const next = { ...prev };
                 Object.keys(liveAmenities).forEach(k => {
@@ -137,18 +141,42 @@ export default function StaffSettings() {
             }
           } catch (e) {}
 
-          // 2. Fetch amenities from Server API (fallback)
-          try {
-            const apiRes = await fetch("/api/settings/amenities");
-            if (apiRes.ok) {
-              const data = await apiRes.json();
-              if (data.success && data.amenities && isMounted) {
+          // 2. Fetch amenities from Server API (fallback if Supabase offline)
+          if (!liveAmenitiesFetched) {
+            try {
+              const apiRes = await fetch("/api/settings/amenities");
+              if (apiRes.ok) {
+                const data = await apiRes.json();
+                if (data.success && data.amenities && isMounted) {
+                  liveAmenitiesFetched = true;
+                  setAmenityStatus(prev => {
+                    const next = { ...prev };
+                    Object.keys(data.amenities).forEach(k => {
+                      if (!isCorruptOrDuplicateItem(k)) {
+                        next[k] = data.amenities[k];
+                      }
+                    });
+                    try {
+                      localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
+                    } catch (e) {}
+                    return next;
+                  });
+                }
+              }
+            } catch (e) {}
+          }
+
+          // 3. Fetch amenities from Firestore (fallback if neither Supabase nor Server API answered)
+          if (!liveAmenitiesFetched) {
+            try {
+              const docRef = doc(db, "settings", "amenities");
+              const docSnap = await getDoc(docRef);
+              if (docSnap.exists() && isMounted) {
+                const dbData = docSnap.data();
                 setAmenityStatus(prev => {
                   const next = { ...prev };
-                  Object.keys(data.amenities).forEach(k => {
-                    if (!isCorruptOrDuplicateItem(k)) {
-                      next[k] = data.amenities[k];
-                    }
+                  COMMON_ITEMS.forEach(item => {
+                    if (dbData[item.name]) next[item.name] = dbData[item.name];
                   });
                   try {
                     localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
@@ -156,27 +184,8 @@ export default function StaffSettings() {
                   return next;
                 });
               }
-            }
-          } catch (e) {}
-
-          // 2. Fetch amenities from Firestore (supplemental merge)
-          try {
-            const docRef = doc(db, "settings", "amenities");
-            const docSnap = await getDoc(docRef);
-            if (docSnap.exists() && isMounted) {
-              const dbData = docSnap.data();
-              setAmenityStatus(prev => {
-                const next = { ...prev };
-                COMMON_ITEMS.forEach(item => {
-                  if (dbData[item.name]) next[item.name] = dbData[item.name];
-                });
-                try {
-                  localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
-                } catch (e) {}
-                return next;
-              });
-            }
-          } catch (e) {}
+            } catch (e) {}
+          }
 
           // 3. Fetch inventory live from Supabase table /api/inventory
           try {
@@ -262,6 +271,15 @@ export default function StaffSettings() {
         localStorage.setItem("hues_stay_amenities", JSON.stringify(updated));
       } catch (e) {}
 
+      // If user manually changed status, this item is a manual choice, NOT an auto-depleted item
+      fetchLiveAutoDepleted().then(autoList => {
+        const set = new Set(autoList);
+        if (set.has(itemName)) {
+          set.delete(itemName);
+          saveLiveAutoDepleted(Array.from(set)).catch(() => {});
+        }
+      }).catch(() => {});
+
       // Automatically sync to Supabase so desktop & mobile update in real-time
       saveLiveAmenitiesStatus(updated).then(() => {
         setLastSavedMsg(`"${itemName}" marked as ${nextStatus === 'available' ? 'Available' : 'Unavailable'} (synced across all devices)`);
@@ -296,9 +314,7 @@ export default function StaffSettings() {
         limitsOnly[k] = updated[k].limit;
       });
       saveLiveInventoryLimits(limitsOnly).catch(() => {});
-      syncInventoryAvailability(undefined, undefined, limitsOnly).then(newStatus => {
-        setAmenityStatus(prevStatus => ({ ...prevStatus, ...newStatus }));
-      }).catch(() => {});
+      syncInventoryAvailability(undefined, undefined, limitsOnly).catch(() => {});
 
       return updated;
     });
@@ -388,15 +404,36 @@ export default function StaffSettings() {
       }
 
       // 2. Persist to Supabase directly for guaranteed instant multi-device sync
-      saveLiveAmenitiesStatus(amenityStatus).catch(() => {});
+      await saveLiveAmenitiesStatus(amenityStatus);
 
-      // Persist inventory limits to Supabase directly & trigger auto-availability
+      // Clean up autoDepletedSet: any items the user marked out_of_service that are not genuinely depleted
+      // should be removed from autoDepletedSet so auto-replenishment never overrides them
+      try {
+        const autoList = await fetchLiveAutoDepleted();
+        const set = new Set(autoList);
+        let autoChanged = false;
+        TARGET_AUTO_UNAVAILABLE_ITEMS.forEach(item => {
+          if (amenityStatus[item] === 'out_of_service') {
+            const inv = inventoryMap[item];
+            const inUse = inv?.inUse || 0;
+            const limit = inv?.limit || DEFAULT_INVENTORY_LIMITS[item] || 1;
+            if (inUse < limit && set.has(item)) {
+              set.delete(item);
+              autoChanged = true;
+            }
+          }
+        });
+        if (autoChanged) {
+          await saveLiveAutoDepleted(Array.from(set));
+        }
+      } catch (e) {}
+
+      // Persist inventory limits to Supabase directly
       const limitsOnly: Record<string, number> = {};
       Object.keys(inventoryMap).forEach(k => {
         limitsOnly[k] = inventoryMap[k].limit;
       });
-      saveLiveInventoryLimits(limitsOnly).catch(() => {});
-      syncInventoryAvailability(undefined, undefined, limitsOnly).catch(() => {});
+      await saveLiveInventoryLimits(limitsOnly);
 
       // 3. Persist to server API and disk (.data/amenities_settings.json) with strict 1.2s timeout
       const controller = new AbortController();

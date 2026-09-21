@@ -45,17 +45,19 @@ async function reconcileServerlessInventory(supabaseUrl: string, supabaseKey: st
       "Authorization": `Bearer ${supabaseKey}`
     };
 
-    const [borRes, reqRes, settingsRes, limitsRes] = await Promise.all([
+    const [borRes, reqRes, settingsRes, limitsRes, autoDepletedRes] = await Promise.all([
       fetch(`${supabaseUrl}/rest/v1/borrowed_items?status=eq.borrowed`, { headers }),
       fetch(`${supabaseUrl}/rest/v1/guest_requests?status=eq.pending`, { headers }),
       fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-amenities-settings-global`, { headers }),
-      fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-inventory-limits-global`, { headers })
+      fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-inventory-limits-global`, { headers }),
+      fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-auto-depleted-items`, { headers })
     ]);
 
     const activeBorrowed: any[] = borRes.ok ? await borRes.json().catch(() => []) : [];
     const pendingReqs: any[] = reqRes.ok ? await reqRes.json().catch(() => []) : [];
     const settingsRows: any[] = settingsRes.ok ? await settingsRes.json().catch(() => []) : [];
     const limitsRows: any[] = limitsRes.ok ? await limitsRes.json().catch(() => []) : [];
+    const autoDepletedRows: any[] = autoDepletedRes.ok ? await autoDepletedRes.json().catch(() => []) : [];
 
     const limits: Record<string, number> = { ...DEFAULT_LIMITS };
     if (limitsRows[0]?.custom_message) {
@@ -70,6 +72,16 @@ async function reconcileServerlessInventory(supabaseUrl: string, supabaseKey: st
         amenityStatus = JSON.parse(settingsRows[0].custom_message);
       } catch (e) {}
     }
+
+    let autoDepleted: string[] = [];
+    if (autoDepletedRows[0]?.custom_message) {
+      try {
+        const parsed = JSON.parse(autoDepletedRows[0].custom_message);
+        if (Array.isArray(parsed)) autoDepleted = parsed;
+      } catch (e) {}
+    }
+    const autoDepletedSet = new Set<string>(autoDepleted);
+    let autoDepletedChanged = false;
 
     let hasChanged = false;
     for (const item of TARGET_AUTO_ITEMS) {
@@ -86,12 +98,42 @@ async function reconcileServerlessInventory(supabaseUrl: string, supabaseKey: st
           amenityStatus[item] = "out_of_service";
           hasChanged = true;
         }
+        if (!autoDepletedSet.has(item)) {
+          autoDepletedSet.add(item);
+          autoDepletedChanged = true;
+        }
       } else {
-        if (amenityStatus[item] === "out_of_service") {
-          amenityStatus[item] = "available";
-          hasChanged = true;
+        // ONLY restore to 'available' if the item was automatically depleted by inventory!
+        // Never override manual owner settings!
+        if (autoDepletedSet.has(item)) {
+          autoDepletedSet.delete(item);
+          autoDepletedChanged = true;
+          if (amenityStatus[item] !== "available") {
+            amenityStatus[item] = "available";
+            hasChanged = true;
+          }
         }
       }
+    }
+
+    if (autoDepletedChanged) {
+      await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+          "Prefer": "resolution=merge-duplicates"
+        },
+        body: JSON.stringify({
+          id: "system-auto-depleted-items",
+          room_id: "SETTINGS",
+          items: [],
+          custom_message: JSON.stringify(Array.from(autoDepletedSet)),
+          status: "completed",
+          created_at: 0,
+          updated_at: new Date().toISOString()
+        })
+      }).catch(() => {});
     }
 
     if (hasChanged) {

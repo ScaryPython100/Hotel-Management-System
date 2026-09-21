@@ -148,6 +148,29 @@ function saveInventoryLimits(limits: Record<string, number>) {
   } catch (e) {}
 }
 
+const AUTO_DEPLETED_FILE = path.join(DATA_DIR, "auto_depleted_items.json");
+
+function loadAutoDepletedItems(): Set<string> {
+  try {
+    if (fs.existsSync(AUTO_DEPLETED_FILE)) {
+      const data = JSON.parse(fs.readFileSync(AUTO_DEPLETED_FILE, "utf-8"));
+      if (Array.isArray(data)) return new Set(data);
+    }
+  } catch (e) {}
+  return new Set();
+}
+
+function saveAutoDepletedItems(items: Set<string>) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(AUTO_DEPLETED_FILE, JSON.stringify(Array.from(items), null, 2), "utf-8");
+  } catch (e) {}
+}
+
+const serverAutoDepletedItems: Set<string> = loadAutoDepletedItems();
+
 // Canonical inventory stock limits (stored in-memory on server, synced across all clients)
 const serverInventoryLimits: Record<string, number> = loadInventoryLimits();
 
@@ -205,6 +228,7 @@ function reconcileServerAutoAvailability() {
   ];
 
   let hasChanged = false;
+  let autoChanged = false;
   for (const item of targetItems) {
     const taken = calculateItemTaken(item);
     const limit = serverInventoryLimits[item] ?? (item === "Iron Box" ? 1 : 2);
@@ -213,16 +237,31 @@ function reconcileServerAutoAvailability() {
         serverAmenitiesStatus[item] = "out_of_service";
         hasChanged = true;
       }
+      if (!serverAutoDepletedItems.has(item)) {
+        serverAutoDepletedItems.add(item);
+        autoChanged = true;
+      }
     } else {
-      if (serverAmenitiesStatus[item] === "out_of_service") {
-        serverAmenitiesStatus[item] = "available";
-        hasChanged = true;
+      // In stock: ONLY restore to available if it was automatically depleted!
+      // Manual owner choices in settings are never overridden!
+      if (serverAutoDepletedItems.has(item)) {
+        serverAutoDepletedItems.delete(item);
+        autoChanged = true;
+        if (serverAmenitiesStatus[item] === "out_of_service") {
+          serverAmenitiesStatus[item] = "available";
+          hasChanged = true;
+        }
       }
     }
   }
 
+  if (autoChanged) {
+    saveAutoDepletedItems(serverAutoDepletedItems);
+  }
+
   if (hasChanged) {
     saveAmenitiesSettings(serverAmenitiesStatus);
+    saveAmenitiesToSupabase(serverAmenitiesStatus).catch(() => {});
   }
 }
 
@@ -681,6 +720,10 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       return res.status(400).json({ success: false, error: "Invalid amenities data" });
     }
     serverAmenitiesStatus = { ...serverAmenitiesStatus, ...amenities };
+    for (const key of Object.keys(amenities)) {
+      serverAutoDepletedItems.delete(key);
+    }
+    saveAutoDepletedItems(serverAutoDepletedItems);
     saveAmenitiesSettings(serverAmenitiesStatus);
     saveAmenitiesToSupabase(serverAmenitiesStatus).catch(() => {});
     console.log("[SETTINGS] Updated amenities availability:", Object.keys(serverAmenitiesStatus).length, "items");
@@ -705,6 +748,10 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
     if (amenities && typeof amenities === "object") {
       serverAmenitiesStatus = { ...serverAmenitiesStatus, ...amenities };
+      for (const key of Object.keys(amenities)) {
+        serverAutoDepletedItems.delete(key);
+      }
+      saveAutoDepletedItems(serverAutoDepletedItems);
       saveAmenitiesSettings(serverAmenitiesStatus);
       saveAmenitiesToSupabase(serverAmenitiesStatus).catch(() => {});
     }
