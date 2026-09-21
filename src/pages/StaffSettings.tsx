@@ -202,6 +202,10 @@ export default function StaffSettings() {
                 });
               }
             }
+          } catch (e) {
+            console.warn("Supabase inventory sync note:", e);
+          }
+
           // 4. Fetch live inventory limits from Supabase & reconcile auto-availability
           try {
             const liveLimits = await fetchLiveInventoryLimits();
