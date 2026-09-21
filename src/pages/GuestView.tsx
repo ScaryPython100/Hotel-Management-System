@@ -2,8 +2,25 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { collection, setDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { getClientSupabase, fetchLiveAmenitiesStatus } from "../lib/supabaseClient";
-import { COMMON_ITEMS, DEFAULT_ROOMS, Room, getItemUnitConsumption, DEFAULT_AMENITY_STATUS } from "../types";
+import { 
+  getClientSupabase, 
+  fetchLiveAmenitiesStatus, 
+  fetchLiveBorrowed, 
+  fetchLiveRequests, 
+  fetchLiveInventoryLimits,
+  syncInventoryAvailability 
+} from "../lib/supabaseClient";
+import { 
+  COMMON_ITEMS, 
+  DEFAULT_ROOMS, 
+  Room, 
+  getItemUnitConsumption, 
+  DEFAULT_AMENITY_STATUS,
+  TARGET_AUTO_UNAVAILABLE_ITEMS,
+  DEFAULT_INVENTORY_LIMITS,
+  normalizeReturnableName,
+  isTargetAutoUnavailableItem
+} from "../types";
 import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
 import { Check, Loader2, Info, ArrowRight, BedDouble, Trash2 } from "lucide-react";
@@ -162,36 +179,50 @@ export default function GuestView() {
   useEffect(() => {
     let isMounted = true;
 
-    // Fetch live inventory from API
+    // Fetch live inventory directly from Supabase borrowed items, requests, & limits
     const fetchLiveInventory = async () => {
       try {
-        const res = await fetch("/api/inventory");
-        if (res.ok) {
-          const data = await res.json();
-          if (data.inventory && Array.isArray(data.inventory) && isMounted) {
-            const invMap: Record<string, { inUse: number, limit: number }> = {};
-            data.inventory.forEach((item: any) => {
-              const itemData = {
-                inUse: item.taken ?? item.inUse ?? 0,
-                limit: item.totalStock ?? item.limit ?? 1
-              };
-              invMap[item.name] = itemData;
-              if (item.name.toLowerCase().includes("glass")) {
-                invMap["Glasses (Set of 2)"] = itemData;
-                invMap["Glasses"] = itemData;
-              } else if (item.name.toLowerCase().includes("kettle") || item.name.toLowerCase().includes("teakettle")) {
-                invMap["Teakettle"] = itemData;
-                invMap["Kettle"] = itemData;
-              }
-            });
-            setInventory(prev => ({ ...prev, ...invMap }));
-            try {
-              localStorage.setItem("hues_stay_inventory", JSON.stringify(invMap));
-            } catch (e) {}
+        const [liveBor, liveReqs, liveLimits] = await Promise.all([
+          fetchLiveBorrowed(),
+          fetchLiveRequests(),
+          fetchLiveInventoryLimits()
+        ]);
+
+        const limits: Record<string, number> = {
+          ...DEFAULT_INVENTORY_LIMITS,
+          ...(liveLimits || {})
+        };
+
+        const activeBorrowed = (liveBor || []).filter(b => b.status === "borrowed");
+        const pendingReqs = (liveReqs || []).filter(r => r.status === "pending");
+
+        const invMap: Record<string, { inUse: number, limit: number }> = {};
+
+        for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
+          const borrowedCount = activeBorrowed.filter(b => normalizeReturnableName(b.itemName) === itemKey).length;
+          const pendingCount = pendingReqs.filter(r => 
+            (r.items || []).some(i => normalizeReturnableName(i) === itemKey)
+          ).length;
+
+          const inUse = borrowedCount + pendingCount;
+          const limit = limits[itemKey] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;
+
+          invMap[itemKey] = { inUse, limit };
+          if (itemKey === "Glasses (Set of 2)") {
+            invMap["Glasses"] = { inUse, limit };
+          } else if (itemKey === "Kettle") {
+            invMap["Teakettle"] = { inUse, limit };
           }
         }
+
+        if (isMounted) {
+          setInventory(prev => ({ ...prev, ...invMap }));
+          try {
+            localStorage.setItem("hues_stay_inventory", JSON.stringify(invMap));
+          } catch (e) {}
+        }
       } catch (err) {
-        console.warn("Inventory fetch note:", err);
+        console.warn("Live inventory fetch note:", err);
       }
     };
 
@@ -287,7 +318,23 @@ export default function GuestView() {
   }, []);
 
   const checkIsItemOutOfService = (item: string): boolean => {
-    if (amenitiesStatus[item] === 'out_of_service') return true;
+    if (!item) return false;
+    const canonical = normalizeReturnableName(item);
+
+    // 1. Direct status from Supabase / state
+    if (amenitiesStatus[item] === 'out_of_service' || amenitiesStatus[canonical] === 'out_of_service') {
+      return true;
+    }
+
+    // 2. Real-time automatic check for the 8 target inventory items:
+    // If active in-use items (borrowed + pending requests) >= limit, mark unavailable immediately
+    if (isTargetAutoUnavailableItem(canonical)) {
+      const inv = getInventoryData(canonical) || getInventoryData(item);
+      if (inv && inv.limit > 0 && inv.inUse >= inv.limit) {
+        return true;
+      }
+    }
+
     const lower = item.toLowerCase().trim();
     if (lower.includes("glass")) {
       if (amenitiesStatus["Glasses (Set of 2)"] === 'out_of_service' || amenitiesStatus["Glasses"] === 'out_of_service') return true;

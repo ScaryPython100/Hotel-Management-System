@@ -119,7 +119,7 @@ let serverAmenitiesStatus: Record<string, 'available' | 'out_of_service'> = load
 
 function loadInventoryLimits(): Record<string, number> {
   const defaults: Record<string, number> = {
-    "Iron Box": 5,
+    "Iron Box": 1,
     "Kettle": 5,
     "Hair Dryer": 2,
     "Laptop Table": 2,
@@ -190,6 +190,40 @@ function calculateItemTaken(itemName: string): number {
   }
 
   return taken;
+}
+
+function reconcileServerAutoAvailability() {
+  const targetItems = [
+    "Iron Box",
+    "Kettle",
+    "Hair Dryer",
+    "Laptop Table",
+    "Leg Massager (Paid)",
+    "Glasses (Set of 2)",
+    "USB 3.0 Cable + Adaptor",
+    "Infrared Heat Therapy Lamp (Paid)"
+  ];
+
+  let hasChanged = false;
+  for (const item of targetItems) {
+    const taken = calculateItemTaken(item);
+    const limit = serverInventoryLimits[item] ?? (item === "Iron Box" ? 1 : 2);
+    if (taken >= limit) {
+      if (serverAmenitiesStatus[item] !== "out_of_service") {
+        serverAmenitiesStatus[item] = "out_of_service";
+        hasChanged = true;
+      }
+    } else {
+      if (serverAmenitiesStatus[item] === "out_of_service") {
+        serverAmenitiesStatus[item] = "available";
+        hasChanged = true;
+      }
+    }
+  }
+
+  if (hasChanged) {
+    saveAmenitiesSettings(serverAmenitiesStatus);
+  }
 }
 
 // Canonical 22 hotel rooms
@@ -412,6 +446,8 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       createdAt: newReq.createdAt
     }).catch(err => console.warn("[EMAIL] Auto-notify error:", err));
 
+    reconcileServerAutoAvailability();
+
     res.json({ success: true, request: newReq });
   });
 
@@ -498,6 +534,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     }
     // Update in Supabase
     markBorrowedReturnedInSupabase(id).catch(e => console.warn("[SUPABASE] Mark returned error:", e));
+    reconcileServerAutoAvailability();
     res.json({ success: true, message: "Item marked as returned" });
   };
   app.patch("/api/borrowed/:id", handleReturnBorrowed);
@@ -512,6 +549,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       serverBorrowed.splice(idx, 1);
     }
     deleteBorrowedFromSupabase(id).catch(e => console.warn("[SUPABASE] Delete borrowed error:", e));
+    reconcileServerAutoAvailability();
     res.json({ success: true, message: "Borrowed item removed" });
   });
 
@@ -763,6 +801,8 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       // clicks "Collect & Return" after retrieving them from the room.
       console.log(`[REQUESTS] Request ${id} toggled to pending. Keeping active borrowed appliances intact.`);
     }
+
+    reconcileServerAutoAvailability();
 
     return res.json({ 
       success: true, 

@@ -2,6 +2,122 @@
 const emailedReqIds = new Set<string>();
 const recentReqFingerprints = new Map<string, number>();
 
+const TARGET_AUTO_ITEMS = [
+  "Iron Box",
+  "Kettle",
+  "Hair Dryer",
+  "Laptop Table",
+  "Leg Massager (Paid)",
+  "Glasses (Set of 2)",
+  "USB 3.0 Cable + Adaptor",
+  "Infrared Heat Therapy Lamp (Paid)"
+];
+
+const DEFAULT_LIMITS: Record<string, number> = {
+  "Iron Box": 1,
+  "Kettle": 5,
+  "Hair Dryer": 2,
+  "Laptop Table": 2,
+  "Leg Massager (Paid)": 1,
+  "Glasses (Set of 2)": 10,
+  "USB 3.0 Cable + Adaptor": 2,
+  "Infrared Heat Therapy Lamp (Paid)": 1
+};
+
+function normalizeItemName(name: string): string {
+  if (!name) return "";
+  const lower = name.toLowerCase().trim();
+  if (lower.includes("iron")) return "Iron Box";
+  if (lower.includes("kettle")) return "Kettle";
+  if (lower.includes("hair") && lower.includes("dryer")) return "Hair Dryer";
+  if (lower.includes("laptop")) return "Laptop Table";
+  if (lower.includes("massager")) return "Leg Massager (Paid)";
+  if (lower.includes("glass")) return "Glasses (Set of 2)";
+  if (lower.includes("usb") || lower.includes("cable") || lower.includes("adaptor")) return "USB 3.0 Cable + Adaptor";
+  if (lower.includes("infrared") || lower.includes("heat therapy")) return "Infrared Heat Therapy Lamp (Paid)";
+  return name.trim();
+}
+
+async function reconcileServerlessInventory(supabaseUrl: string, supabaseKey: string) {
+  try {
+    const headers = {
+      "apikey": supabaseKey,
+      "Authorization": `Bearer ${supabaseKey}`
+    };
+
+    const [borRes, reqRes, settingsRes, limitsRes] = await Promise.all([
+      fetch(`${supabaseUrl}/rest/v1/borrowed_items?status=eq.borrowed`, { headers }),
+      fetch(`${supabaseUrl}/rest/v1/guest_requests?status=eq.pending`, { headers }),
+      fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-amenities-settings-global`, { headers }),
+      fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-inventory-limits-global`, { headers })
+    ]);
+
+    const activeBorrowed: any[] = borRes.ok ? await borRes.json().catch(() => []) : [];
+    const pendingReqs: any[] = reqRes.ok ? await reqRes.json().catch(() => []) : [];
+    const settingsRows: any[] = settingsRes.ok ? await settingsRes.json().catch(() => []) : [];
+    const limitsRows: any[] = limitsRes.ok ? await limitsRes.json().catch(() => []) : [];
+
+    const limits: Record<string, number> = { ...DEFAULT_LIMITS };
+    if (limitsRows[0]?.custom_message) {
+      try {
+        Object.assign(limits, JSON.parse(limitsRows[0].custom_message));
+      } catch (e) {}
+    }
+
+    let amenityStatus: Record<string, string> = {};
+    if (settingsRows[0]?.custom_message) {
+      try {
+        amenityStatus = JSON.parse(settingsRows[0].custom_message);
+      } catch (e) {}
+    }
+
+    let hasChanged = false;
+    for (const item of TARGET_AUTO_ITEMS) {
+      const borCount = activeBorrowed.filter(b => normalizeItemName(b.item_name) === item).length;
+      const pendCount = pendingReqs.filter(r => 
+        Array.isArray(r.items) && r.items.some((i: string) => normalizeItemName(i) === item)
+      ).length;
+
+      const inUse = borCount + pendCount;
+      const limit = limits[item] ?? DEFAULT_LIMITS[item] ?? 1;
+
+      if (inUse >= limit) {
+        if (amenityStatus[item] !== "out_of_service") {
+          amenityStatus[item] = "out_of_service";
+          hasChanged = true;
+        }
+      } else {
+        if (amenityStatus[item] === "out_of_service") {
+          amenityStatus[item] = "available";
+          hasChanged = true;
+        }
+      }
+    }
+
+    if (hasChanged) {
+      await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+          "Prefer": "resolution=merge-duplicates"
+        },
+        body: JSON.stringify({
+          id: "system-amenities-settings-global",
+          room_id: "SETTINGS",
+          items: [],
+          custom_message: JSON.stringify(amenityStatus),
+          status: "completed",
+          created_at: 0,
+          updated_at: new Date().toISOString()
+        })
+      });
+    }
+  } catch (err: any) {
+    console.warn("[INVENTORY RECONCILE] Error:", err?.message);
+  }
+}
+
 export default async function handler(req: any, res: any) {
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
   const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY)?.trim();
@@ -133,6 +249,10 @@ export default async function handler(req: any, res: any) {
       }
     })().catch(() => {});
 
+    if (supabaseUrl && supabaseKey) {
+      reconcileServerlessInventory(supabaseUrl, supabaseKey).catch(() => {});
+    }
+
     return res.status(200).json({
       success: true,
       request: {
@@ -172,6 +292,7 @@ export default async function handler(req: any, res: any) {
           }
         });
       }
+      reconcileServerlessInventory(supabaseUrl, supabaseKey).catch(() => {});
     }
 
     return res.status(200).json({ success: true });

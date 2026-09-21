@@ -1,8 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { doc, getDoc, setDoc, collection, getDocs, updateDoc, addDoc, query, where } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { COMMON_ITEMS, DEFAULT_AMENITY_STATUS } from "../types";
-import { fetchLiveAmenitiesStatus, saveLiveAmenitiesStatus } from "../lib/supabaseClient";
+import { COMMON_ITEMS, DEFAULT_AMENITY_STATUS, TARGET_AUTO_UNAVAILABLE_ITEMS, DEFAULT_INVENTORY_LIMITS } from "../types";
+import { 
+  fetchLiveAmenitiesStatus, 
+  saveLiveAmenitiesStatus, 
+  fetchLiveInventoryLimits, 
+  saveLiveInventoryLimits, 
+  syncInventoryAvailability 
+} from "../lib/supabaseClient";
 import { 
   ShieldAlert, 
   CheckCircle2, 
@@ -196,8 +202,30 @@ export default function StaffSettings() {
                 });
               }
             }
+          // 4. Fetch live inventory limits from Supabase & reconcile auto-availability
+          try {
+            const liveLimits = await fetchLiveInventoryLimits();
+            if (liveLimits && isMounted) {
+              setInventoryMap(prev => {
+                const next = { ...prev };
+                Object.keys(liveLimits).forEach(k => {
+                  if (!isCorruptOrDuplicateItem(k)) {
+                    next[k] = { ...(next[k] || { inUse: 0 }), limit: liveLimits[k] };
+                  }
+                });
+                try {
+                  localStorage.setItem("hues_stay_inventory", JSON.stringify(next));
+                } catch (e) {}
+                return next;
+              });
+            }
+
+            const freshStatus = await syncInventoryAvailability(undefined, undefined, liveLimits || undefined);
+            if (freshStatus && isMounted) {
+              setAmenityStatus(prev => ({ ...prev, ...freshStatus }));
+            }
           } catch (e) {
-            console.warn("Supabase inventory sync note:", e);
+            console.warn("Live limits & auto-availability sync note:", e);
           }
         })();
 
@@ -257,6 +285,17 @@ export default function StaffSettings() {
       try {
         localStorage.setItem("hues_stay_inventory", JSON.stringify(updated));
       } catch (e) {}
+
+      // Automatically sync limits to Supabase & trigger auto-availability
+      const limitsOnly: Record<string, number> = {};
+      Object.keys(updated).forEach(k => {
+        limitsOnly[k] = updated[k].limit;
+      });
+      saveLiveInventoryLimits(limitsOnly).catch(() => {});
+      syncInventoryAvailability(undefined, undefined, limitsOnly).then(newStatus => {
+        setAmenityStatus(prevStatus => ({ ...prevStatus, ...newStatus }));
+      }).catch(() => {});
+
       return updated;
     });
   };
@@ -347,7 +386,15 @@ export default function StaffSettings() {
       // 2. Persist to Supabase directly for guaranteed instant multi-device sync
       saveLiveAmenitiesStatus(amenityStatus).catch(() => {});
 
-      // 2. Persist to server API and disk (.data/amenities_settings.json) with strict 1.2s timeout
+      // Persist inventory limits to Supabase directly & trigger auto-availability
+      const limitsOnly: Record<string, number> = {};
+      Object.keys(inventoryMap).forEach(k => {
+        limitsOnly[k] = inventoryMap[k].limit;
+      });
+      saveLiveInventoryLimits(limitsOnly).catch(() => {});
+      syncInventoryAvailability(undefined, undefined, limitsOnly).catch(() => {});
+
+      // 3. Persist to server API and disk (.data/amenities_settings.json) with strict 1.2s timeout
       const controller = new AbortController();
       const fetchTimeout = setTimeout(() => controller.abort(), 1200);
 

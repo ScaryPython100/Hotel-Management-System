@@ -35,7 +35,7 @@ export const COMMON_ITEMS: AmenityItem[] = [
   { name: "Water Bottle (Paid)", category: "Service" },
   
   // Items (Inventory)
-  { name: "Iron Box", isLimited: true, category: "Item", defaultLimit: 5, unitMultiplier: 1 },
+  { name: "Iron Box", isLimited: true, category: "Item", defaultLimit: 1, unitMultiplier: 1 },
   { name: "Kettle", isLimited: true, category: "Item", defaultLimit: 5, unitMultiplier: 1 },
   { name: "Hair Dryer", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
   { name: "Laptop Table", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
@@ -44,6 +44,30 @@ export const COMMON_ITEMS: AmenityItem[] = [
   { name: "USB 3.0 Cable + Adaptor", isLimited: true, category: "Item", defaultLimit: 2, unitMultiplier: 1 },
   { name: "Infrared Heat Therapy Lamp (Paid)", isLimited: true, category: "Item", defaultLimit: 1, unitMultiplier: 1 }
 ];
+
+export const TARGET_AUTO_UNAVAILABLE_ITEMS = [
+  "Iron Box",
+  "Kettle",
+  "Hair Dryer",
+  "Laptop Table",
+  "Leg Massager (Paid)",
+  "Glasses (Set of 2)",
+  "USB 3.0 Cable + Adaptor",
+  "Infrared Heat Therapy Lamp (Paid)"
+] as const;
+
+export type TargetAutoUnavailableItem = typeof TARGET_AUTO_UNAVAILABLE_ITEMS[number];
+
+export const DEFAULT_INVENTORY_LIMITS: Record<string, number> = {
+  "Iron Box": 1,
+  "Kettle": 5,
+  "Hair Dryer": 2,
+  "Laptop Table": 2,
+  "Leg Massager (Paid)": 1,
+  "Glasses (Set of 2)": 10,
+  "USB 3.0 Cable + Adaptor": 2,
+  "Infrared Heat Therapy Lamp (Paid)": 1
+};
 
 export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_service'> = {
   "Wifi Password (HuesStay123@)": "available",
@@ -116,6 +140,12 @@ export function normalizeReturnableName(rawName: string): string {
   if (lower.includes("usb") || lower.includes("cable") || lower.includes("adaptor")) return "USB 3.0 Cable + Adaptor";
   if (lower.includes("infrared") || lower.includes("therapy lamp") || lower.includes("heat therapy")) return "Infrared Heat Therapy Lamp (Paid)";
   return base;
+}
+
+export function isTargetAutoUnavailableItem(name: string): boolean {
+  if (!name) return false;
+  const canonical = normalizeReturnableName(name);
+  return (TARGET_AUTO_UNAVAILABLE_ITEMS as readonly string[]).includes(canonical);
 }
 
 export function isReturnableItem(name: string): boolean {

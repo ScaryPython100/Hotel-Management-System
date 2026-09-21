@@ -1,5 +1,12 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { RoomRequest, BorrowedItem } from "../types";
+import { 
+  RoomRequest, 
+  BorrowedItem, 
+  TARGET_AUTO_UNAVAILABLE_ITEMS, 
+  DEFAULT_INVENTORY_LIMITS, 
+  DEFAULT_AMENITY_STATUS, 
+  normalizeReturnableName 
+} from "../types";
 
 // Public Supabase credentials from client environment
 const rawMeta = typeof import.meta !== "undefined" ? (import.meta as any).env : {};
@@ -367,5 +374,157 @@ export async function clearAllLiveRequests(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Fetch global inventory limits directly from Supabase
+ */
+export async function fetchLiveInventoryLimits(): Promise<Record<string, number> | null> {
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      const { data, error } = await sb
+        .from("guest_requests")
+        .select("custom_message")
+        .eq("id", "system-inventory-limits-global")
+        .single();
+
+      if (!error && data && data.custom_message) {
+        const parsed = JSON.parse(data.custom_message);
+        if (parsed && typeof parsed === "object") {
+          return parsed;
+        }
+      }
+    } catch (err) {
+      console.warn("[CLIENT SUPABASE] Direct fetch limits fallback:", err);
+    }
+  }
+  return null;
+}
+
+/**
+ * Save global inventory limits directly to Supabase
+ */
+export async function saveLiveInventoryLimits(limits: Record<string, number>): Promise<boolean> {
+  let success = false;
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      const { error } = await sb
+        .from("guest_requests")
+        .upsert({
+          id: "system-inventory-limits-global",
+          room_id: "SETTINGS",
+          items: [],
+          custom_message: JSON.stringify(limits),
+          status: "completed",
+          created_at: 0
+        }, { onConflict: "id" });
+      if (!error) success = true;
+    } catch (err) {
+      console.warn("[CLIENT SUPABASE] Save limits error:", err);
+    }
+  }
+  return success;
+}
+
+/**
+ * Synchronize amenity availability for the 8 target items based on live inventory limits and active in-use items.
+ * An item automatically becomes 'out_of_service' when active borrowed items + pending requests >= inventory limit.
+ * It automatically returns to 'available' when items are returned and in-use < inventory limit.
+ */
+export async function syncInventoryAvailability(
+  borrowedList?: BorrowedItem[],
+  requestsList?: RoomRequest[],
+  customLimits?: Record<string, number>
+): Promise<Record<string, 'available' | 'out_of_service'>> {
+  const sb = getClientSupabase();
+
+  // 1. Fetch live borrowed if not provided
+  let activeBorrowed = borrowedList;
+  if (!activeBorrowed && sb) {
+    activeBorrowed = await fetchLiveBorrowed();
+  }
+  const borrowed = (activeBorrowed || []).filter(b => b.status === "borrowed");
+
+  // 2. Fetch live requests if not provided
+  let liveReqs = requestsList;
+  if (!liveReqs && sb) {
+    liveReqs = await fetchLiveRequests();
+  }
+  const pending = (liveReqs || []).filter(r => r.status === "pending");
+
+  // 3. Resolve inventory limits
+  const limits: Record<string, number> = {
+    ...DEFAULT_INVENTORY_LIMITS,
+    ...(customLimits || {})
+  };
+
+  try {
+    const savedLimits = localStorage.getItem("hues_stay_inventory_limits");
+    if (savedLimits) {
+      Object.assign(limits, JSON.parse(savedLimits));
+    }
+  } catch (e) {}
+
+  const liveLimits = await fetchLiveInventoryLimits();
+  if (liveLimits) {
+    Object.assign(limits, liveLimits);
+    try {
+      localStorage.setItem("hues_stay_inventory_limits", JSON.stringify(limits));
+    } catch (e) {}
+  }
+
+  // 4. Resolve current amenity availability status
+  let currentStatus: Record<string, 'available' | 'out_of_service'> = { ...DEFAULT_AMENITY_STATUS };
+  try {
+    const saved = localStorage.getItem("hues_stay_amenities");
+    if (saved) {
+      Object.assign(currentStatus, JSON.parse(saved));
+    }
+  } catch (e) {}
+
+  const liveStatus = await fetchLiveAmenitiesStatus();
+  if (liveStatus) {
+    Object.assign(currentStatus, liveStatus);
+  }
+
+  // 5. Evaluate availability strictly for the 8 target items
+  let hasChanged = false;
+  const updatedStatus = { ...currentStatus };
+
+  for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
+    const borrowedCount = borrowed.filter(b => normalizeReturnableName(b.itemName) === itemKey).length;
+    const pendingCount = pending.filter(r => 
+      (r.items || []).some(i => normalizeReturnableName(i) === itemKey)
+    ).length;
+
+    const inUse = borrowedCount + pendingCount;
+    const limit = limits[itemKey] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;
+
+    if (inUse >= limit) {
+      if (updatedStatus[itemKey] !== "out_of_service") {
+        updatedStatus[itemKey] = "out_of_service";
+        hasChanged = true;
+      }
+    } else {
+      // If inUse < limit and it was out_of_service, mark it available again
+      if (updatedStatus[itemKey] === "out_of_service") {
+        updatedStatus[itemKey] = "available";
+        hasChanged = true;
+      }
+    }
+  }
+
+  // 6. If any status changed, update localStorage and Supabase immediately
+  if (hasChanged) {
+    try {
+      localStorage.setItem("hues_stay_amenities", JSON.stringify(updatedStatus));
+    } catch (e) {}
+    await saveLiveAmenitiesStatus(updatedStatus);
+  }
+
+  return updatedStatus;
+}
+
 
 

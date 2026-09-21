@@ -9,6 +9,7 @@ import {
   dismissLiveRequest, 
   saveLiveBorrowed, 
   clearAllLiveRequests,
+  syncInventoryAvailability,
   getClientSupabase 
 } from "../lib/supabaseClient";
 import { formatDistanceToNow } from "date-fns";
@@ -149,6 +150,12 @@ export default function StaffDashboard() {
             localStorage.setItem("hues_stay_borrowed", JSON.stringify(sorted));
           } catch (e) {}
         }
+
+        // Auto-reconcile availability for the 8 target items based on inventory limits & in-use requests
+        syncInventoryAvailability(
+          Array.isArray(liveBor) ? liveBor : undefined, 
+          Array.isArray(liveReqs) ? liveReqs : undefined
+        ).catch(() => {});
       } catch (e: any) {
         console.warn("Live sync refresh error:", e?.message || e);
       } finally {
@@ -248,6 +255,10 @@ export default function StaffDashboard() {
 
     // 3. Update status in live Supabase and server
     await updateLiveRequestStatus(id, "completed");
+
+    // 4. Immediately trigger auto-unavailability update across all devices
+    const nextBorrowedList = [...newlyCreatedBorrowed, ...borrowedItems];
+    syncInventoryAvailability(nextBorrowedList, updated).catch(() => {});
   };
 
   const handleToggleStatus = async (id: string, currentStatus: "pending" | "completed") => {
@@ -295,6 +306,10 @@ export default function StaffDashboard() {
 
     // 3. Persist to live Supabase and server
     await updateLiveRequestStatus(id, newStatus);
+
+    // 4. Immediately trigger auto-unavailability update across all devices
+    const nextBorrowedList = [...toAdd, ...borrowedItems];
+    syncInventoryAvailability(nextBorrowedList, updated).catch(() => {});
   };
 
   const handleDelete = async (id: string) => {
@@ -368,6 +383,7 @@ export default function StaffDashboard() {
     } catch (e) {}
     toast.loading("Clearing database...", { id: "clear-db" });
     const ok = await clearAllLiveRequests();
+    syncInventoryAvailability([], []).catch(() => {});
     if (ok) {
       toast.success("Database and dashboard completely cleared!", { id: "clear-db" });
     } else {
@@ -389,10 +405,14 @@ export default function StaffDashboard() {
 
     // 2. Automatically sync to live Supabase and backend
     await markLiveBorrowedReturned(borrowedId);
+
+    // 3. Immediately re-evaluate availability for the 8 target items
+    syncInventoryAvailability(updated, requests).catch(() => {});
   };
 
   const handleDeleteBorrowed = async (id: string, itemName: string) => {
-    setBorrowedItems(prev => prev.filter(b => b.id !== id));
+    const remaining = borrowedItems.filter(b => b.id !== id);
+    setBorrowedItems(remaining);
     try {
       const saved = JSON.parse(localStorage.getItem("hues_stay_borrowed") || "[]");
       const next = saved.filter((b: any) => b.id !== id);
@@ -402,6 +422,9 @@ export default function StaffDashboard() {
     
     // Delete in live Supabase and backend
     await deleteLiveBorrowed(id);
+
+    // Immediately re-evaluate availability for the 8 target items
+    syncInventoryAvailability(remaining, requests).catch(() => {});
   };
 
   const pendingRequests = requests.filter(r => r.status === "pending");
