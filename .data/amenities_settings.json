@@ -1,18 +1,18 @@
 {
+  "Wifi Password (HuesStay123@)": "available",
+  "Supervisor Contact Number (8431995152)": "available",
   "Soap Refill": "out_of_service",
   "Shampoo Refill": "out_of_service",
   "Hand wash Refill": "available",
-  "Wifi Password Request": "available",
-  "Extend the Stay (Inform Supervisor via Call)": "available",
+  "Stay Extension": "available",
   "Housekeeping Service (Only Between 9 A.M. and 5 P.M.)": "available",
   "Water Bottle (Paid)": "available",
-  "Laundry wash assistance (Paid, self responsibility)": "available",
   "Iron Box": "available",
-  "Teakettle": "available",
+  "Kettle": "available",
   "Hair Dryer": "available",
   "Laptop Table": "available",
   "Leg Massager (Paid)": "available",
   "Glasses (Set of 2)": "available",
-  "USB 2.0 Adaptor + Cable": "available",
-  "USB 3.0 Adaptor + Cable": "available"
+  "USB 3.0 Cable + Adaptor": "available",
+  "Infrared Heat Therapy Lamp (Paid)": "available"
 }

@@ -432,6 +432,18 @@ export default function GuestView() {
         body: JSON.stringify(requestData)
       }).catch(err => console.warn("Server API sync:", err));
 
+      // 4. Also trigger /api/notify non-blockingly to guarantee instant email delivery on Vercel
+      fetch('/api/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomNumber: String(roomNumber),
+          items: finalItems,
+          customMessage: customMessage.trim(),
+          id: reqId
+        })
+      }).catch(err => console.warn("Notify API dispatch:", err));
+
       // Limit waiting time to maximum 600ms so guest gets immediate feedback
       await Promise.race([
         firestoreTask,
