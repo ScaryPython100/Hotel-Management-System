@@ -70,6 +70,9 @@ export default function GuestView() {
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
   const [customMessage, setCustomMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showGuestForm, setShowGuestForm] = useState(false);
+  const [guestName, setGuestName] = useState("");
+  const [phoneNumber, setPhoneNumber] = useState("");
   const [isSuccess, setIsSuccess] = useState(false);
   const [lastSubmittedId, setLastSubmittedId] = useState<string | null>(() => {
     try {
@@ -389,7 +392,7 @@ export default function GuestView() {
     setIsValidating(false);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleProceedToGuestForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!roomNumber) return;
 
@@ -398,47 +401,62 @@ export default function GuestView() {
       return;
     }
 
+    // Verify no selected item is currently out of service
+    const outOfServiceSelected = selectedItems.filter(item => checkIsItemOutOfService(item));
+    if (outOfServiceSelected.length > 0) {
+      toast.error(`${outOfServiceSelected.join(", ")} ${outOfServiceSelected.length > 1 ? 'are' : 'is'} currently unavailable. Please remove from your selection.`);
+      return;
+    }
+
+    // Find requested items that are limited
+    const limitedItemsRequested = selectedItems.filter(item => {
+      const staticItem = COMMON_ITEMS.find(i => i.name === item);
+      if (staticItem) return staticItem.isLimited;
+      return inventory[item] !== undefined;
+    });
+
+    // Verify stock for limited items using internal unit consumption before proceeding
+    for (const item of limitedItemsRequested) {
+      const inv = getInventoryData(item);
+      const neededUnits = getItemUnitConsumption(item);
+      if (inv) {
+        const available = Math.max(0, inv.limit - inv.inUse);
+        if (available < neededUnits) {
+          toast.error(`${item} is currently unavailable. Please remove it from your selection.`);
+          return;
+        }
+      }
+    }
+
+    setShowGuestForm(true);
+  };
+
+  const handleFinalSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!guestName.trim() || !phoneNumber.trim()) {
+      toast.error("Guest Name and Phone Number are required.");
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
-      // Verify no selected item is currently out of service
-      const outOfServiceSelected = selectedItems.filter(item => checkIsItemOutOfService(item));
-      if (outOfServiceSelected.length > 0) {
-        toast.error(`${outOfServiceSelected.join(", ")} ${outOfServiceSelected.length > 1 ? 'are' : 'is'} currently unavailable. Please remove from your selection.`);
-        setIsSubmitting(false);
-        return;
-      }
-
-      // Find requested items that are limited
-      const limitedItemsRequested = selectedItems.filter(item => {
-        const staticItem = COMMON_ITEMS.find(i => i.name === item);
-        if (staticItem) return staticItem.isLimited;
-        return inventory[item] !== undefined;
-      });
-
-      // Verify stock for limited items using internal unit consumption before proceeding
-      for (const item of limitedItemsRequested) {
-        const inv = getInventoryData(item);
-        const neededUnits = getItemUnitConsumption(item);
-        if (inv) {
-          const available = Math.max(0, inv.limit - inv.inUse);
-          if (available < neededUnits) {
-            toast.error(`${item} is currently unavailable. Please remove it from your selection.`);
-            setIsSubmitting(false);
-            return;
-          }
-        }
-      }
-
       const finalItems = [...selectedItems];
       const reqId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
+      // Append Name and Phone Number to custom message
+      const formattedMessage = [
+        `Guest Name: ${guestName.trim()}`,
+        `Phone Number: ${phoneNumber.trim()}`,
+        customMessage.trim() ? `\nMessage:\n${customMessage.trim()}` : ""
+      ].filter(Boolean).join("\n");
 
       const requestData = {
         id: reqId,
         roomId: roomNumber,
         qrCodeHash: hash || roomNumber,
         items: finalItems,
-        customMessage: customMessage.trim(),
+        customMessage: formattedMessage,
         status: "pending" as const,
         createdAt: Date.now(),
       };
@@ -455,7 +473,7 @@ export default function GuestView() {
           id: reqId,
           room_id: String(roomNumber),
           items: finalItems,
-          custom_message: customMessage.trim(),
+          custom_message: formattedMessage,
           status: "pending",
           created_at: requestData.createdAt
         }, { onConflict: "id" }).then(({ error }) => {
@@ -486,7 +504,7 @@ export default function GuestView() {
         body: JSON.stringify({
           roomNumber: String(roomNumber),
           items: finalItems,
-          customMessage: customMessage.trim(),
+          customMessage: formattedMessage,
           id: reqId
         })
       }).catch(err => console.warn("Notify API dispatch:", err));
@@ -627,9 +645,24 @@ export default function GuestView() {
                 ];
                 const displayName = comingSoonItems.includes(item) ? `${item} (Coming Soon)` : item;
                 
+                const emojiMap: Record<string, string> = {
+                  "Iron Box": "👕",
+                  "Kettle": "🫖",
+                  "Hair Dryer": "💇‍♀️",
+                  "Laptop Table": "💻",
+                  "Leg Massager (Paid)": "🦵",
+                  "Glasses (Set of 2)": "🥃",
+                  "USB 3.0 Cable + Adaptor": "🔌",
+                  "Infrared Heat Therapy Lamp (Paid)": "💡"
+                };
+                const emoji = emojiMap[item];
+
                 return (
                   <li key={item} className="flex justify-between items-center py-1 border-b border-[#F2EFE9] last:border-0">
-                    <span className="font-serif">{displayName}</span>
+                    <span className="font-serif">
+                      {emoji && <span className="mr-1.5">{emoji}</span>}
+                      {displayName}
+                    </span>
                     <span className="font-mono text-xs text-[#A68966] bg-[#FAF8F5] px-2 py-0.5 border border-[#EBE7E1] rounded-xs">
                       Requested
                     </span>
@@ -664,6 +697,62 @@ export default function GuestView() {
     );
   }
 
+  if (showGuestForm) {
+    return (
+      <div className="min-h-screen bg-[#FDFBF7] flex flex-col items-center pt-12 px-6">
+        <Toaster position="top-center" />
+        <div className="max-w-md w-full bg-white border border-[#E5E1DB] p-8 shadow-sm text-center">
+          <h2 className="text-3xl font-serif italic mb-2">Guest Details</h2>
+          <p className="text-[#8C857D] text-sm mb-6">
+            Please provide your details to confirm your request for Room {roomNumber}.
+          </p>
+          <form onSubmit={handleFinalSubmit}>
+            <div className="space-y-4 mb-8 text-left">
+              <div>
+                <label className="block text-[10px] uppercase tracking-widest text-[#8C857D] font-mono mb-2 font-semibold">Guest Name</label>
+                <input
+                  type="text"
+                  required
+                  value={guestName}
+                  onChange={e => setGuestName(e.target.value)}
+                  className="w-full border border-[#E5E1DB] p-3 text-sm focus:outline-none focus:border-[#A68966] bg-[#FAF8F5] transition-colors"
+                  placeholder="Enter your name"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] uppercase tracking-widest text-[#8C857D] font-mono mb-2 font-semibold">Phone Number</label>
+                <input
+                  type="tel"
+                  required
+                  value={phoneNumber}
+                  onChange={e => setPhoneNumber(e.target.value)}
+                  className="w-full border border-[#E5E1DB] p-3 text-sm focus:outline-none focus:border-[#A68966] bg-[#FAF8F5] transition-colors"
+                  placeholder="Enter your phone number"
+                />
+              </div>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={() => setShowGuestForm(false)}
+                className="flex-1 py-4 bg-white text-[#2D2926] border border-[#E5E1DB] font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#F2EFE9] transition-colors cursor-pointer"
+              >
+                Back
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="flex-1 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors flex justify-center items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {isSubmitting ? "Sending..." : "Confirm Request"}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   const totalRequestedCount = selectedItems.length;
 
   return (
@@ -682,7 +771,10 @@ export default function GuestView() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6">
-        <form onSubmit={handleSubmit} className="space-y-8">
+        <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 mb-8 text-center text-[#8C857D] text-sm uppercase tracking-widest font-mono select-none">
+          Service Timings: 9:00 AM to 8:00 PM
+        </div>
+        <form onSubmit={handleProceedToGuestForm} className="space-y-8">
           
           <section>
             <h2 className="text-xl font-serif mb-4 flex items-center">
@@ -783,6 +875,18 @@ export default function GuestView() {
                   const isComingSoon = comingSoonItems.includes(item);
                   const displayName = isComingSoon ? `${item} (Coming Soon)` : item;
 
+                  const emojiMap: Record<string, string> = {
+                    "Iron Box": "👕",
+                    "Kettle": "🫖",
+                    "Hair Dryer": "💇‍♀️",
+                    "Laptop Table": "💻",
+                    "Leg Massager (Paid)": "🦵",
+                    "Glasses (Set of 2)": "🥃",
+                    "USB 3.0 Cable + Adaptor": "🔌",
+                    "Infrared Heat Therapy Lamp (Paid)": "💡"
+                  };
+                  const emoji = emojiMap[item];
+
                   return (
                     <div
                       key={item}
@@ -804,7 +908,10 @@ export default function GuestView() {
                       )}
                     >
                       <div className="flex justify-between items-start w-full gap-2">
-                        <span className="font-serif text-base md:text-lg leading-tight block">{displayName}</span>
+                        <span className="font-serif text-base md:text-lg leading-tight block">
+                          {emoji && <span className="mr-2 text-xl inline-block">{emoji}</span>}
+                          {displayName}
+                        </span>
                         <div
                           className={cn(
                             "w-5 h-5 flex items-center justify-center shrink-0 border rounded-xs mt-0.5 transition-colors",
