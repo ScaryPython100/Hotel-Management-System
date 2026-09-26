@@ -805,13 +805,13 @@ export default function GuestView() {
             Service Timings: 9:00 AM to 8:00 PM
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center text-[#8C857D] text-xs sm:text-sm uppercase tracking-widest font-mono select-none">
-              <span className="text-[#A68966] font-semibold block text-[11px] mb-0.5">WiFi Network & Password</span>
-              <span className="font-semibold text-[#2D2926]">HuesStay123@</span>
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center font-mono select-none">
+              <span className="text-[#A68966] font-semibold block text-[11px] uppercase tracking-widest mb-1">WiFi Network & Password</span>
+              <span className="font-semibold text-[#2D2926] text-sm sm:text-base tracking-normal select-all">HuesStay123@</span>
             </div>
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center text-[#8C857D] text-xs sm:text-sm uppercase tracking-widest font-mono select-none">
-              <span className="text-[#A68966] font-semibold block text-[11px] mb-0.5">Supervisor Contact Number</span>
-              <a href="tel:8431995152" className="font-semibold text-[#2D2926] hover:underline">8431995152</a>
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center font-mono select-none">
+              <span className="text-[#A68966] font-semibold block text-[11px] uppercase tracking-widest mb-1">Supervisor Contact Number</span>
+              <a href="tel:8431995152" className="font-semibold text-[#2D2926] text-sm sm:text-base tracking-normal hover:underline">8431995152</a>
             </div>
           </div>
         </div>
