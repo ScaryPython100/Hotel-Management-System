@@ -802,7 +802,7 @@ export default function GuestView() {
         {/* Info Tiles: Service Timings, WiFi, Supervisor Details */}
         <div className="space-y-3 mb-8">
           <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center text-[#8C857D] text-sm uppercase tracking-widest font-mono select-none">
-            Service Timings: 9:00 AM to 8:00 PM
+            Service Timings (Perferably): 9:00 AM to 8:00 PM 
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center font-mono select-none">
