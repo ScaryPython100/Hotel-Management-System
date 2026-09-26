@@ -988,7 +988,7 @@ export default function GuestView() {
             <textarea
               value={customMessage}
               onChange={(e) => setCustomMessage(e.target.value)}
-              placeholder="E.g., Please bring a bucket of ice..."
+              placeholder="E.g., Let me know late checkout charges..."
               className="w-full p-6 border border-[#E5E1DB] bg-white text-[#2D2926] placeholder:text-[#8C857D] focus:outline-none focus:border-[#A68966] min-h-[120px] resize-none rounded-none"
             ></textarea>
           </section>
@@ -996,7 +996,7 @@ export default function GuestView() {
           <div className="bg-white border border-[#E5E1DB] p-6 flex gap-3 text-[#8C857D]">
             <Info className="w-5 h-5 shrink-0 text-[#A68966]" />
             <p className="text-sm italic">
-              Your request will be sent instantly to our housekeeping team. We aim to fulfill all requests within 10 minutes.
+              Your request will be sent instantly to our housekeeping team. We aim to fulfill ASAP.
             </p>
           </div>
 
