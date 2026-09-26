@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { X, Lock } from "lucide-react";
-import toast from "react-hot-toast";
+import { toast } from "sonner";
 
 interface PinAuthModalProps {
   isOpen: boolean;

@@ -362,10 +362,14 @@ export async function clearAllLiveRequests(): Promise<boolean> {
     try {
       await sb.from("guest_requests").delete().neq("room_id", "SETTINGS");
       await sb.from("borrowed_items").delete().neq("id", "none_placeholder_never_matches");
+      await saveLiveDismissedRequests([]);
     } catch (e) {
       console.warn("[CLIENT SUPABASE] Clear error:", e);
     }
   }
+  try {
+    localStorage.removeItem("hues_stay_dismissed_requests");
+  } catch (e) {}
 
   try {
     const res = await fetch("/api/requests/clear-all", { method: "POST" });
@@ -471,6 +475,110 @@ export async function saveLiveAutoDepleted(items: string[]): Promise<boolean> {
           custom_message: JSON.stringify(items),
           status: "completed",
           created_at: 0
+        }, { onConflict: "id" });
+      return true;
+    } catch (e) {}
+  }
+  return false;
+}
+
+/**
+ * Fetch list of dismissed/cleared request IDs directly from Supabase (instant cross-device sync)
+ */
+export async function fetchLiveDismissedRequests(): Promise<string[]> {
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      const { data, error } = await sb
+        .from("guest_requests")
+        .select("custom_message")
+        .eq("id", "system-dismissed-requests-global")
+        .single();
+      if (!error && data && data.custom_message) {
+        const parsed = JSON.parse(data.custom_message);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {}
+  }
+  try {
+    const saved = localStorage.getItem("hues_stay_dismissed_requests");
+    if (saved) return JSON.parse(saved);
+  } catch (e) {}
+  return [];
+}
+
+/**
+ * Save list of dismissed/cleared request IDs directly to Supabase so ALL devices clear them instantly
+ */
+export async function saveLiveDismissedRequests(ids: string[]): Promise<boolean> {
+  try {
+    localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(ids));
+  } catch (e) {}
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      await sb
+        .from("guest_requests")
+        .upsert({
+          id: "system-dismissed-requests-global",
+          room_id: "SETTINGS",
+          items: [],
+          custom_message: JSON.stringify(ids),
+          status: "completed",
+          created_at: 0,
+          updated_at: new Date().toISOString()
+        }, { onConflict: "id" });
+      return true;
+    } catch (e) {}
+  }
+  return false;
+}
+
+/**
+ * Fetch permanently deleted items from Supabase
+ */
+export async function fetchLiveDeletedItems(): Promise<string[]> {
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      const { data, error } = await sb
+        .from("guest_requests")
+        .select("custom_message")
+        .eq("id", "system-deleted-items")
+        .single();
+      if (!error && data && data.custom_message) {
+        const parsed = JSON.parse(data.custom_message);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {}
+  }
+  try {
+    const saved = localStorage.getItem("hues_stay_deleted_items");
+    if (saved) return JSON.parse(saved);
+  } catch (e) {}
+  return [];
+}
+
+/**
+ * Save permanently deleted items to Supabase so they are excluded across all devices
+ */
+export async function saveLiveDeletedItems(items: string[]): Promise<boolean> {
+  try {
+    localStorage.setItem("hues_stay_deleted_items", JSON.stringify(items));
+  } catch (e) {}
+  const sb = getClientSupabase();
+  if (sb) {
+    try {
+      await sb
+        .from("guest_requests")
+        .upsert({
+          id: "system-deleted-items",
+          room_id: "SETTINGS",
+          items: [],
+          custom_message: JSON.stringify(items),
+          status: "completed",
+          created_at: 0,
+          updated_at: new Date().toISOString()
         }, { onConflict: "id" });
       return true;
     } catch (e) {}

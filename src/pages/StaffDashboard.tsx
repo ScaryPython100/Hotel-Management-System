@@ -10,7 +10,10 @@ import {
   saveLiveBorrowed, 
   clearAllLiveRequests,
   syncInventoryAvailability,
-  getClientSupabase 
+  getClientSupabase,
+  fetchLiveDismissedRequests,
+  saveLiveDismissedRequests,
+  fetchLiveInventoryLimits
 } from "../lib/supabaseClient";
 import { formatDistanceToNow } from "date-fns";
 import { 
@@ -27,9 +30,11 @@ import {
   Check,
   RotateCcw,
   History,
-  ArchiveRestore
+  ArchiveRestore,
+  RefreshCw
 } from "lucide-react";
-import toast, { Toaster } from "react-hot-toast";
+import { toast, Toaster } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
 
 function getDismissedRequestIds(): string[] {
   try {
@@ -125,15 +130,21 @@ export default function StaffDashboard() {
     // Shared single source of truth across all devices (Supabase live queries with API fallback)
     const refreshData = async () => {
       try {
-        const [liveReqs, liveBor] = await Promise.all([
+        const [liveReqs, liveBor, cloudDismissed] = await Promise.all([
           fetchLiveRequests(),
-          fetchLiveBorrowed()
+          fetchLiveBorrowed(),
+          fetchLiveDismissedRequests()
         ]);
 
+        const localDismissed = getDismissedRequestIds();
+        const allDismissed = Array.from(new Set([...cloudDismissed, ...localDismissed]));
+        try {
+          localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(allDismissed));
+        } catch (e) {}
+
         if (Array.isArray(liveReqs)) {
-          const dismissed = getDismissedRequestIds();
           const valid = liveReqs
-            .filter((r: RoomRequest) => !dismissed.includes(r.id || ""))
+            .filter((r: RoomRequest) => !allDismissed.includes(r.id || ""))
             .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
           
           const deduplicated = deduplicateRequests(valid);
@@ -273,12 +284,13 @@ export default function StaffDashboard() {
     } catch (e) {}
 
     // 2. If marking completed, also track returnable appliances
+    let toAdd: BorrowedItem[] = [];
     if (newStatus === "completed" && targetReq && Array.isArray(targetReq.items)) {
       const returnables = targetReq.items
         .filter(item => isReturnableItem(item))
         .map(item => normalizeReturnableName(item));
 
-      const toAdd: BorrowedItem[] = [];
+      toAdd = [];
       for (const item of returnables) {
         const alreadyActive = borrowedItems.some(
           b => b.roomId.trim().toLowerCase() === targetReq.roomId.trim().toLowerCase() &&
@@ -316,22 +328,22 @@ export default function StaffDashboard() {
     if (!id) return;
     if (!window.confirm("Remove this request from the dashboard view?\n\n(Note: The request record will remain permanently preserved in your Supabase database as required.)")) return;
 
-    // Save ONLY the specific request ID to dismissed list
-    try {
-      const dismissed = getDismissedRequestIds();
-      if (!dismissed.includes(id)) {
-        dismissed.push(id);
-        localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(dismissed));
-      }
-    } catch (e) {}
-
     // Optimistic local update (instant)
     const updated = requests.filter(r => r.id !== id);
     setRequests(updated);
     try {
       localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
     } catch (e) {}
-    toast.success("Request removed from dashboard (preserved in Supabase)");
+
+    // Save to dismissed list locally and in Supabase so ALL devices remove it immediately
+    try {
+      const cloudDismissed = await fetchLiveDismissedRequests();
+      const localDismissed = getDismissedRequestIds();
+      const allDismissed = Array.from(new Set([...cloudDismissed, ...localDismissed, id]));
+      await saveLiveDismissedRequests(allDismissed);
+    } catch (e) {}
+
+    toast.success("Request removed from dashboard across all devices");
 
     // Dismiss in live Supabase and server
     await dismissLiveRequest(id);
@@ -348,26 +360,81 @@ export default function StaffDashboard() {
     }
 
     const completedIds = completed.map(r => r.id!).filter(Boolean);
-    try {
-      const dismissed = getDismissedRequestIds();
-      completedIds.forEach(id => {
-        if (!dismissed.includes(id)) dismissed.push(id);
-      });
-      localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(dismissed));
-    } catch (e) {}
 
+    // Optimistic local update (instant)
     const remaining = requests.filter(r => r.status !== "completed");
     setRequests(remaining);
     try {
       localStorage.setItem("hues_stay_requests", JSON.stringify(remaining));
     } catch (e) {}
 
-    // Tell Supabase to soft-delete each completed item
+    // Save to dismissed list locally and in Supabase so ALL devices clear immediately
+    try {
+      const cloudDismissed = await fetchLiveDismissedRequests();
+      const localDismissed = getDismissedRequestIds();
+      const allDismissed = Array.from(new Set([...cloudDismissed, ...localDismissed, ...completedIds]));
+      await saveLiveDismissedRequests(allDismissed);
+    } catch (e) {}
+
+    // Soft-delete in Supabase
     for (const id of completedIds) {
       dismissLiveRequest(id);
     }
 
-    toast.success(`Cleared ${completed.length} completed records from view.`);
+    toast.success(`Cleared ${completed.length} completed records across all devices.`);
+  };
+
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+
+  const handleManualSyncToDatabase = async () => {
+    setIsManualSyncing(true);
+    try {
+      const [liveReqs, liveBor, cloudDismissed, liveLimits] = await Promise.all([
+        fetchLiveRequests(),
+        fetchLiveBorrowed(),
+        fetchLiveDismissedRequests(),
+        fetchLiveInventoryLimits()
+      ]);
+
+      const localDismissed = getDismissedRequestIds();
+      const allDismissed = Array.from(new Set([...cloudDismissed, ...localDismissed]));
+      try {
+        localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(allDismissed));
+      } catch (e) {}
+
+      if (Array.isArray(liveReqs)) {
+        const valid = liveReqs
+          .filter((r: RoomRequest) => !allDismissed.includes(r.id || ""))
+          .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
+        const deduplicated = deduplicateRequests(valid);
+        setRequests(deduplicated);
+        try {
+          localStorage.setItem("hues_stay_requests", JSON.stringify(deduplicated));
+        } catch (e) {}
+      }
+
+      if (Array.isArray(liveBor)) {
+        const sorted = liveBor.sort((a: BorrowedItem, b: BorrowedItem) => (b.createdAt || 0) - (a.createdAt || 0));
+        setBorrowedItems(sorted);
+        try {
+          localStorage.setItem("hues_stay_borrowed", JSON.stringify(sorted));
+        } catch (e) {}
+      }
+
+      // Reconcile and push availability to Supabase across all devices
+      await syncInventoryAvailability(
+        Array.isArray(liveBor) ? liveBor : undefined,
+        Array.isArray(liveReqs) ? liveReqs : undefined,
+        liveLimits || undefined
+      );
+
+      toast.success("Database synced successfully across all devices!");
+    } catch (err: any) {
+      console.error("Manual sync failed:", err);
+      toast.error("Failed to sync with database: " + (err?.message || "Check connection"));
+    } finally {
+      setIsManualSyncing(false);
+    }
   };
 
   const handleClearAllDatabaseRequests = async () => {
@@ -526,6 +593,17 @@ export default function StaffDashboard() {
                   Borrowed {activeBorrowed.length > 0 && `(${activeBorrowed.length})`}
                 </button>
               </div>
+
+              <button
+                type="button"
+                onClick={handleManualSyncToDatabase}
+                disabled={isManualSyncing}
+                className="px-4 py-2 border border-[#A68966] text-[#A68966] bg-[#FAF8F5] hover:bg-[#A68966] hover:text-white text-xs font-semibold tracking-wider uppercase transition-colors flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                title="Force immediate synchronization with Supabase database across all devices"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin' : ''}`} />
+                {isManualSyncing ? "Syncing..." : "Sync to Database"}
+              </button>
 
               {(requests.length > 0 || borrowedItems.length > 0) && (
                 <button

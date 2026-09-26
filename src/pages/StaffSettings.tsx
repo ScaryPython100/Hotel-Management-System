@@ -9,6 +9,8 @@ import {
   saveLiveInventoryLimits, 
   fetchLiveAutoDepleted,
   saveLiveAutoDepleted,
+  fetchLiveDeletedItems,
+  saveLiveDeletedItems,
   syncInventoryAvailability 
 } from "../lib/supabaseClient";
 import { 
@@ -16,9 +18,10 @@ import {
   CheckCircle2, 
   Package, 
   RefreshCw,
-  Plus
+  Plus,
+  Trash2
 } from "lucide-react";
-import toast, { Toaster } from "react-hot-toast";
+import { toast, Toaster } from "sonner";
 import { useOutletContext } from "react-router-dom";
 
 function isCorruptOrDuplicateItem(name: string): boolean {
@@ -103,6 +106,14 @@ export default function StaffSettings() {
     return localStorage.getItem("hues_stay_superhost_pin") || "9999";
   });
 
+  const [deletedItems, setDeletedItems] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem("hues_stay_deleted_items");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
+
   // Dynamic new item state for owner
   const [newItemName, setNewItemName] = useState("");
   const [newItemLimit, setNewItemLimit] = useState("5");
@@ -120,6 +131,17 @@ export default function StaffSettings() {
         );
 
         const loadTask = (async () => {
+          // 0. Fetch deleted items from Supabase
+          try {
+            const liveDeleted = await fetchLiveDeletedItems();
+            if (liveDeleted && isMounted) {
+              setDeletedItems(liveDeleted);
+              try {
+                localStorage.setItem("hues_stay_deleted_items", JSON.stringify(liveDeleted));
+              } catch (e) {}
+            }
+          } catch (e) {}
+
           // 1. Fetch amenities from Supabase (guaranteed cross-device sync)
           let liveAmenitiesFetched = false;
           try {
@@ -331,43 +353,52 @@ export default function StaffSettings() {
       return;
     }
 
-    // 1. Immediately update UI state so app displays it right away
-    setInventoryMap(prev => {
-      const updated = {
-        ...prev,
-        [clean]: { limit: limitNum, inUse: 0 }
-      };
-      try {
-        localStorage.setItem("hues_stay_inventory", JSON.stringify(updated));
-      } catch (e) {}
-      return updated;
-    });
-
-    setAmenityStatus(prev => {
-      const updated = { ...prev, [clean]: 'available' as const };
-      try {
-        localStorage.setItem("hues_stay_amenities", JSON.stringify(updated));
-      } catch (e) {}
-      return updated;
-    });
-
-    // 2. Automatically sync to Supabase database inventory table
-    try {
-      await fetch("/api/inventory", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: clean,
-          totalStock: limitNum,
-          category: "Item",
-          taken: 0
-        })
-      });
-    } catch (err) {
-      console.warn("Supabase add item note:", err);
+    // 1. If previously deleted, un-delete it
+    if (deletedItems.includes(clean)) {
+      const nextDeleted = deletedItems.filter(d => d !== clean);
+      setDeletedItems(nextDeleted);
+      await saveLiveDeletedItems(nextDeleted);
     }
 
-    // 3. Sync to Firestore
+    // 2. Immediately update UI state so app displays it right away
+    const updatedInv = {
+      ...inventoryMap,
+      [clean]: { limit: limitNum, inUse: 0 }
+    };
+    setInventoryMap(updatedInv);
+    try {
+      localStorage.setItem("hues_stay_inventory", JSON.stringify(updatedInv));
+    } catch (e) {}
+
+    const updatedAmenity: Record<string, 'available' | 'out_of_service'> = {
+      ...amenityStatus,
+      [clean]: 'available'
+    };
+    setAmenityStatus(updatedAmenity);
+    try {
+      localStorage.setItem("hues_stay_amenities", JSON.stringify(updatedAmenity));
+    } catch (e) {}
+
+    // 3. Immediately persist limits and availability to Supabase so it NEVER disappears
+    const limitsOnly: Record<string, number> = {};
+    Object.keys(updatedInv).forEach(k => {
+      limitsOnly[k] = updatedInv[k].limit;
+    });
+    await saveLiveInventoryLimits(limitsOnly);
+    await saveLiveAmenitiesStatus(updatedAmenity);
+
+    // 4. Also sync to server API
+    fetch("/api/settings/save-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amenities: updatedAmenity,
+        inventory: updatedInv,
+        pin: superhostPin.trim()
+      })
+    }).catch(() => {});
+
+    // 5. Sync to Firestore
     try {
       const invQ = query(collection(db, "inventory"), where("name", "==", clean));
       const snap = await getDocs(invQ);
@@ -380,10 +411,68 @@ export default function StaffSettings() {
       }
     } catch (e) {}
 
-    toast.success(`"${clean}" added to Inventory & App!`);
+    toast.success(`"${clean}" added to Inventory & Guest View!`);
     setNewItemName("");
     setNewItemLimit("5");
     setIsAddingItem(false);
+  };
+
+  // Permanently delete an item from inventory and guest menus
+  const handleDeleteItem = async (itemName: string) => {
+    if (!window.confirm(`Are you sure you want to permanently delete "${itemName}"?\n\nIt will be removed immediately from all guest rooms and staff settings across all devices.`)) {
+      return;
+    }
+
+    // 1. Add to permanently deleted items in Supabase
+    const nextDeleted = Array.from(new Set([...deletedItems, itemName]));
+    setDeletedItems(nextDeleted);
+    await saveLiveDeletedItems(nextDeleted);
+
+    // 2. Remove from local inventory map
+    const updatedInv = { ...inventoryMap };
+    delete updatedInv[itemName];
+    setInventoryMap(updatedInv);
+    try {
+      localStorage.setItem("hues_stay_inventory", JSON.stringify(updatedInv));
+    } catch (e) {}
+
+    // 3. Remove from amenity status
+    const updatedAmenity = { ...amenityStatus };
+    delete updatedAmenity[itemName];
+    setAmenityStatus(updatedAmenity);
+    try {
+      localStorage.setItem("hues_stay_amenities", JSON.stringify(updatedAmenity));
+    } catch (e) {}
+
+    // 4. Save updated limits and amenities to Supabase
+    const limitsOnly: Record<string, number> = {};
+    Object.keys(updatedInv).forEach(k => {
+      limitsOnly[k] = updatedInv[k].limit;
+    });
+    await saveLiveInventoryLimits(limitsOnly);
+    await saveLiveAmenitiesStatus(updatedAmenity);
+
+    // 5. Also sync to server API
+    fetch("/api/settings/save-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        amenities: updatedAmenity,
+        inventory: updatedInv,
+        pin: superhostPin.trim()
+      })
+    }).catch(() => {});
+
+    // 6. Delete from Firestore if exists
+    try {
+      const invQ = query(collection(db, "inventory"), where("name", "==", itemName));
+      const snap = await getDocs(invQ);
+      snap.forEach(d => {
+        import("firebase/firestore").then(({ deleteDoc }) => deleteDoc(d.ref).catch(() => {}));
+      });
+    } catch (e) {}
+
+    toast.success(`"${itemName}" deleted permanently across all devices.`);
   };
 
   const handleSave = async () => {
@@ -504,15 +593,16 @@ export default function StaffSettings() {
 
   // Combine default items with any dynamically added items from the database/owner
   const allDisplayItems = React.useMemo(() => {
+    const deletedSet = new Set(deletedItems);
     const itemMap = new Map<string, { name: string, category: 'Service' | 'Item', isLimited?: boolean }>();
-    COMMON_ITEMS.forEach(i => itemMap.set(i.name, i));
+    COMMON_ITEMS.filter(i => !deletedSet.has(i.name)).forEach(i => itemMap.set(i.name, i));
     Object.keys(inventoryMap).forEach(name => {
-      if (!isCorruptOrDuplicateItem(name) && !itemMap.has(name)) {
+      if (!deletedSet.has(name) && !isCorruptOrDuplicateItem(name) && !itemMap.has(name)) {
         itemMap.set(name, { name, category: 'Item', isLimited: true });
       }
     });
     return Array.from(itemMap.values());
-  }, [inventoryMap]);
+  }, [inventoryMap, deletedItems]);
 
   return (
     <div className="p-8 md:p-12 w-full max-w-4xl">
@@ -649,7 +739,9 @@ export default function StaffSettings() {
             )}
 
             <div className="space-y-4">
-              {Object.keys(inventoryMap).map((itemName) => {
+              {Object.keys(inventoryMap)
+                .filter(name => !deletedItems.includes(name) && !isCorruptOrDuplicateItem(name))
+                .map((itemName) => {
                 const invData = inventoryMap[itemName] || { limit: 1, inUse: 0 };
                 const taken = invData.inUse || 0;
                 const total = invData.limit || 1;
@@ -672,16 +764,27 @@ export default function StaffSettings() {
                       </div>
                     </div>
                     
-                    <div className="flex items-center gap-4">
-                      <label htmlFor={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`} className="text-sm text-[#8C857D]">Total Stock:</label>
-                      <input
-                        id={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`}
-                        type="number"
-                        min="1"
-                        value={invData.limit}
-                        onChange={(e) => handleLimitChange(itemName, e.target.value)}
-                        className="w-20 p-2 border border-[#E5E1DB] bg-white text-center focus:outline-none focus:border-[#A68966]"
-                      />
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2">
+                        <label htmlFor={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`} className="text-sm text-[#8C857D]">Total Stock:</label>
+                        <input
+                          id={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`}
+                          type="number"
+                          min="1"
+                          value={invData.limit}
+                          onChange={(e) => handleLimitChange(itemName, e.target.value)}
+                          className="w-20 p-2 border border-[#E5E1DB] bg-white text-center focus:outline-none focus:border-[#A68966]"
+                        />
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteItem(itemName)}
+                        title={`Delete "${itemName}"`}
+                        className="p-2 border border-red-200 text-red-600 bg-red-50 hover:bg-red-600 hover:text-white transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
                 );

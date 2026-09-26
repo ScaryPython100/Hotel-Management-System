@@ -10,3 +10,5 @@ coverage/
 *.key
 *.pem
 test-*
+.agents/
+skills-lock.json

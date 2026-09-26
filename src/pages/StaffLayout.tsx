@@ -1,7 +1,7 @@
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LayoutDashboard, QrCode, Settings, LogOut, Lock } from "lucide-react";
 import { useState, useEffect } from "react";
-import toast, { Toaster } from "react-hot-toast";
+import { toast, Toaster } from "sonner";
 import PinAuthModal from "../components/PinAuthModal";
 
 export default function StaffLayout() {

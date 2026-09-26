@@ -25,8 +25,6 @@ export interface AmenityItem {
 
 export const COMMON_ITEMS: AmenityItem[] = [
   // Services
-  { name: "Wifi Password (HuesStay123@)", category: "Service" },
-  { name: "Supervisor Contact Number (8431995152)", category: "Service" },
   { name: "Shower Gel Refill", category: "Service" },
   { name: "Shampoo Refill", category: "Service" },
   { name: "Hand wash Refill", category: "Service" },
@@ -70,8 +68,6 @@ export const DEFAULT_INVENTORY_LIMITS: Record<string, number> = {
 };
 
 export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_service'> = {
-  "Wifi Password (HuesStay123@)": "available",
-  "Supervisor Contact Number (8431995152)": "available",
   "Shower Gel Refill": "out_of_service",
   "Shampoo Refill": "out_of_service",
   "Hand wash Refill": "available",

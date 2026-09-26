@@ -3,7 +3,7 @@ import { collection, query, orderBy, onSnapshot, setDoc, deleteDoc, doc } from "
 import { db } from "../lib/firebase";
 import { Room, DEFAULT_ROOMS } from "../types";
 import { QRCodeSVG } from "qrcode.react";
-import toast, { Toaster } from "react-hot-toast";
+import { toast, Toaster } from "sonner";
 import { Plus, Trash2, Printer, ExternalLink, Copy, Check, Search, Layers, RefreshCw } from "lucide-react";
 import { useOutletContext, Navigate } from "react-router-dom";
 

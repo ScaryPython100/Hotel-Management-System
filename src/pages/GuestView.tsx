@@ -8,6 +8,7 @@ import {
   fetchLiveBorrowed, 
   fetchLiveRequests, 
   fetchLiveInventoryLimits,
+  fetchLiveDeletedItems,
   syncInventoryAvailability 
 } from "../lib/supabaseClient";
 import { 
@@ -106,6 +107,14 @@ export default function GuestView() {
     return { ...DEFAULT_AMENITY_STATUS };
   });
 
+  const [deletedItems, setDeletedItems] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem("hues_stay_deleted_items");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
+
   // Background room verification with strict 800ms timeout
   useEffect(() => {
     if (roomNumber) {
@@ -182,14 +191,23 @@ export default function GuestView() {
   useEffect(() => {
     let isMounted = true;
 
-    // Fetch live inventory directly from Supabase borrowed items, requests, & limits
+    // Fetch live inventory directly from Supabase borrowed items, requests, limits, and deleted items
     const fetchLiveInventory = async () => {
       try {
-        const [liveBor, liveReqs, liveLimits] = await Promise.all([
+        const [liveBor, liveReqs, liveLimits, liveDeleted] = await Promise.all([
           fetchLiveBorrowed(),
           fetchLiveRequests(),
-          fetchLiveInventoryLimits()
+          fetchLiveInventoryLimits(),
+          fetchLiveDeletedItems()
         ]);
+
+        const deletedSet = new Set(liveDeleted || []);
+        if (isMounted && liveDeleted) {
+          setDeletedItems(liveDeleted);
+          try {
+            localStorage.setItem("hues_stay_deleted_items", JSON.stringify(liveDeleted));
+          } catch (e) {}
+        }
 
         const limits: Record<string, number> = {
           ...DEFAULT_INVENTORY_LIMITS,
@@ -201,14 +219,24 @@ export default function GuestView() {
 
         const invMap: Record<string, { inUse: number, limit: number }> = {};
 
-        for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
-          const borrowedCount = activeBorrowed.filter(b => normalizeReturnableName(b.itemName) === itemKey).length;
+        // Include ALL items: default items + target items + custom items added via limits
+        const allItemKeys = Array.from(new Set([
+          ...COMMON_ITEMS.filter(i => i.category === 'Item').map(i => i.name),
+          ...TARGET_AUTO_UNAVAILABLE_ITEMS,
+          ...Object.keys(limits)
+        ])).filter(name => !deletedSet.has(name));
+
+        for (const itemKey of allItemKeys) {
+          const canonical = normalizeReturnableName(itemKey);
+          const borrowedCount = activeBorrowed.filter(b => 
+            normalizeReturnableName(b.itemName) === canonical || normalizeReturnableName(b.itemName) === itemKey
+          ).length;
           const pendingCount = pendingReqs.filter(r => 
-            (r.items || []).some(i => normalizeReturnableName(i) === itemKey)
+            (r.items || []).some(i => normalizeReturnableName(i) === canonical || normalizeReturnableName(i) === itemKey)
           ).length;
 
           const inUse = borrowedCount + pendingCount;
-          const limit = limits[itemKey] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;
+          const limit = limits[itemKey] ?? limits[canonical] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;
 
           invMap[itemKey] = { inUse, limit };
           if (itemKey === "Glasses (Set of 2)") {
@@ -771,8 +799,21 @@ export default function GuestView() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6">
-        <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 mb-8 text-center text-[#8C857D] text-sm uppercase tracking-widest font-mono select-none">
-          Service Timings: 9:00 AM to 8:00 PM
+        {/* Info Tiles: Service Timings, WiFi, Supervisor Details */}
+        <div className="space-y-3 mb-8">
+          <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center text-[#8C857D] text-sm uppercase tracking-widest font-mono select-none">
+            Service Timings: 9:00 AM to 8:00 PM
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center text-[#8C857D] text-xs sm:text-sm uppercase tracking-widest font-mono select-none">
+              <span className="text-[#A68966] font-semibold block text-[11px] mb-0.5">WiFi Network & Password</span>
+              <span className="font-semibold text-[#2D2926]">HuesStay123@</span>
+            </div>
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center text-[#8C857D] text-xs sm:text-sm uppercase tracking-widest font-mono select-none">
+              <span className="text-[#A68966] font-semibold block text-[11px] mb-0.5">Supervisor Contact Number</span>
+              <a href="tel:8431995152" className="font-semibold text-[#2D2926] hover:underline">8431995152</a>
+            </div>
+          </div>
         </div>
         <form onSubmit={handleProceedToGuestForm} className="space-y-8">
           
@@ -781,7 +822,12 @@ export default function GuestView() {
               Daily Service Requests
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {COMMON_ITEMS.filter(i => i.category === 'Service').map((itemObj) => {
+              {COMMON_ITEMS.filter(i => 
+                i.category === 'Service' && 
+                !deletedItems.includes(i.name) &&
+                !i.name.toLowerCase().includes('wifi') && 
+                !i.name.toLowerCase().includes('supervisor')
+              ).map((itemObj) => {
                 const item = itemObj.name;
                 const isSelected = selectedItems.includes(item);
                 const isOutOfService = checkIsItemOutOfService(item);
@@ -835,13 +881,15 @@ export default function GuestView() {
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
               {(() => {
+                const deletedSet = new Set(deletedItems);
                 const itemsList: Array<{ name: string; isLimited: boolean }> = [
-                  ...COMMON_ITEMS.filter(i => i.category === 'Item').map(i => ({ name: i.name, isLimited: !!i.isLimited }))
+                  ...COMMON_ITEMS.filter(i => i.category === 'Item' && !deletedSet.has(i.name)).map(i => ({ name: i.name, isLimited: !!i.isLimited }))
                 ];
                 Object.keys(inventory).forEach(invName => {
-                  // Filter out duplicate aliases and corrupt data from showing up in the UI
+                  // Filter out duplicate aliases, deleted items, and corrupt data from showing up in the UI
                   const lower = invName.toLowerCase().trim();
                   if (
+                    deletedSet.has(invName) ||
                     lower === "teakettle" || 
                     lower === "glasses" || 
                     lower === "water glasses" || 
