@@ -921,7 +921,7 @@ export default function GuestView() {
                     "Glasses (Set of 2)"
                   ];
                   const isComingSoon = comingSoonItems.includes(item);
-                  const displayName = isComingSoon ? `${item} (Coming Soon)` : item;
+                  const displayName = isComingSoon ? `${item}` : item;
 
                   const emojiMap: Record<string, string> = {
                     "Iron Box": "👕",
