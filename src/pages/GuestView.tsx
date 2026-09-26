@@ -671,7 +671,7 @@ export default function GuestView() {
                   "Infrared Heat Therapy Lamp (Paid)",
                   "Glasses (Set of 2)"
                 ];
-                const displayName = comingSoonItems.includes(item) ? `${item} (Coming Soon)` : item;
+                const displayName = comingSoonItems.includes(item) ? `${item}` : item;
                 
                 const emojiMap: Record<string, string> = {
                   "Iron Box": "👕",
