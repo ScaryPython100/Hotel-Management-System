@@ -2,12 +2,50 @@
 const notifiedIds = new Set<string>();
 const recentNotifyFingerprints = new Map<string, number>();
 
-export default async function handler(req, res) {
+function getSenderConfig(): { from: string; replyTo: string } {
+  const envFrom = process.env.RESEND_FROM_EMAIL?.trim();
+  const replyTo = "huesstay@gmail.com";
+
+  // Resend strictly rejects requests where 'from' contains @gmail.com or other public email domains
+  // because public domains cannot have SPF/DKIM configured by individual users.
+  // We sanitize the sender to use Resend's verified onboarding domain while setting reply_to so all replies
+  // go directly to huesstay@gmail.com.
+  const isPublicWebmail = !envFrom || /@(gmail\.com|yahoo\.com|outlook\.com|hotmail\.com|icloud\.com)/i.test(envFrom);
+  const from = isPublicWebmail
+    ? "Hues Stay Concierge <onboarding@resend.dev>"
+    : (envFrom.includes("<") ? envFrom : `Hues Stay Concierge <${envFrom}>`);
+
+  return { from, replyTo };
+}
+
+function getRecipientList(): string[] {
+  const envTo = process.env.RESEND_TO_EMAILS?.trim();
+  if (envTo) {
+    const list = envTo.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+    if (list.length > 0) return list;
+  }
+  return ["huesstay@gmail.com"];
+}
+
+export default async function handler(req: any, res: any) {
+  // CORS Headers
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
+  );
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  const { roomNumber, items, customMessage, id: providedId } = req.body;
+  const { roomNumber, items, customMessage, id: providedId } = req.body || {};
   const roomIdStr = String(roomNumber || "Unknown").trim();
 
   // Guard against system/settings records
@@ -26,9 +64,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ success: true, message: "Request already notified" });
   }
 
-  // Deduplication check 2: Check by content fingerprint within 2 minutes (120,000 ms)
+  // Deduplication check 2: Check by content fingerprint within 15 seconds (catches rapid double-clicks)
   const lastSent = recentNotifyFingerprints.get(fingerprint);
-  if (lastSent && (now - lastSent) < 120000) {
+  if (lastSent && (now - lastSent) < 15000) {
     console.log(`[NOTIFY DEDUPLICATE] Suppressed duplicate email by fingerprint for Room ${roomIdStr} (sent ${(now - lastSent)/1000}s ago)`);
     if (providedId) notifiedIds.add(String(providedId));
     return res.status(200).json({ success: true, message: "Identical request already notified recently" });
@@ -38,7 +76,10 @@ export default async function handler(req, res) {
   if (providedId) notifiedIds.add(String(providedId));
   recentNotifyFingerprints.set(fingerprint, now);
 
-  const fromAddress = process.env.RESEND_FROM_EMAIL?.trim() || "Hues Stay Concierge <onboarding@resend.dev>";
+  const { from: fromAddress, replyTo: replyToAddress } = getSenderConfig();
+  const recipientList = getRecipientList();
+  const primaryRecipient = recipientList[0] || "huesstay@gmail.com";
+
   const timestamp = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
 
   const formattedMessage = `🛎️ NEW GUEST REQUEST - ROOM ${roomIdStr}\n` +
@@ -49,7 +90,7 @@ export default async function handler(req, res) {
     `${items && items.length > 0 ? items.map((i: string) => `  • ${i}`).join("\n") : "  (No specific items)"}\n\n` +
     (customMessage ? `Guest Note:\n  "${customMessage}"\n\n` : "") +
     `Open Staff Dashboard to attend to this request.\n` +
-    `https://ais-dev-6pq7a4aadlk33uog2vbo7m-437727623674.asia-southeast1.run.app/staff\n\n` +
+    `https://huesstayluxuryrooms.vercel.app/staff\n\n` +
     `---\nHues Stay Automated Concierge System`;
 
   // 1. Sync to Supabase if credentials are configured
@@ -83,25 +124,14 @@ export default async function handler(req, res) {
     }
   }
 
-  console.log(`[RESEND EMAIL] Dispatching Email alert for Room ${roomIdStr}...`);
-  
-  function getResendApiKey(): string {
-    const envKey = process.env.RESEND_API_KEY?.trim();
-    if (envKey && envKey.startsWith("re_") && !envKey.startsWith("re_8HsM") && !envKey.startsWith("re_1234")) {
-      return envKey;
-    }
-    // Fallback verified key (base64 encoded to avoid git secret false positives)
-    return Buffer.from("cmVfMnB2bUNQOU1fM01BdkRkQzZ0U2Z5WEF4UUFwcTJ3d0c2", "base64").toString("utf-8");
-  }
+  console.log(`[RESEND EMAIL] Dispatching Email alert for Room ${roomIdStr} to ${primaryRecipient}...`);
 
-  const resendApiKey = getResendApiKey();
+  const resendApiKey = process.env.RESEND_API_KEY?.trim();
   const dashboardUrl = process.env.APP_URL 
     ? `${process.env.APP_URL.replace(/\/$/, '')}/staff` 
     : "https://huesstayluxuryrooms.vercel.app/staff";
-  
-  if (resendApiKey) {
-    const primaryRecipient = "huesstay@gmail.com";
 
+  if (resendApiKey) {
     try {
       const resendResponse = await fetch('https://api.resend.com/emails', {
         method: 'POST',
@@ -112,26 +142,28 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           from: fromAddress,
           to: [primaryRecipient],
+          reply_to: replyToAddress,
           subject: `🛎️ New Request: Room ${roomIdStr}`,
           text: formattedMessage,
           html: `<!DOCTYPE html><html><body style="font-family:sans-serif;color:#2D2926;background:#F9F7F4;padding:24px;"><div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #E5E1DB;padding:28px;"><h2 style="margin:0 0 16px;color:#2D2926;font-size:20px;">🛎️ New Request: Room ${roomIdStr}</h2><p style="margin:0 0 12px;color:#59534C;"><strong>Items Requested:</strong></p><ul style="margin:0 0 16px;padding-left:20px;color:#2D2926;">${items && items.length > 0 ? items.map((i: string) => `<li>${i}</li>`).join("") : "<li>No specific items</li>"}</ul>${customMessage ? `<p style="margin:0 0 16px;color:#59534C;"><strong>Note:</strong> ${customMessage}</p>` : ""}<div style="margin-top:24px;"><a href="${dashboardUrl}" style="background:#2D2926;color:#ffffff;text-decoration:none;padding:10px 20px;font-size:13px;font-weight:bold;letter-spacing:1px;display:inline-block;">OPEN STAFF DASHBOARD</a></div></div></body></html>`
         })
       });
-      
+
       if (!resendResponse.ok) {
         const errorText = await resendResponse.text();
-        console.warn(`[RESEND] Failed with status ${resendResponse.status}: ${errorText}`);
-        throw new Error(`Resend API returned status: ${resendResponse.status} - ${errorText}`);
+        console.error(`[RESEND] Failed with status ${resendResponse.status}: ${errorText}`);
+        return res.status(500).json({ success: false, error: "Resend API rejected dispatch", details: errorText });
       }
-      
+
       const resData = await resendResponse.json().catch(() => ({}));
+      console.log(`[RESEND] Successfully sent email to ${primaryRecipient}. Resend ID: ${resData.id}`);
       return res.status(200).json({ success: true, message: "Staff notified successfully", id: resData.id });
     } catch (e: any) {
-      console.error("Failed to trigger Resend email:", e?.message || e);
+      console.error("[RESEND] Network or execution failure:", e?.message || e);
       return res.status(500).json({ success: false, error: "Failed to trigger notification email", details: e?.message });
     }
   } else {
-    console.log("Missing RESEND_API_KEY in environment variables.");
+    console.warn("[RESEND] Missing RESEND_API_KEY in environment variables.");
     return res.status(500).json({ success: false, error: "Server missing Resend API configuration" });
   }
 }

@@ -776,6 +776,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     });
   });
 
+
   // PATCH or PUT update request status
   const handleUpdateStatus = async (req: express.Request, res: express.Response) => {
     const { id } = req.params;
@@ -913,24 +914,22 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   }
 
   async function sendStaffEmailAlert({ roomNumber, items, customMessage }: EmailAlertParams): Promise<{ success: boolean; details?: any; error?: string }> {
-    function getResendKey(): string {
-      const envKey = process.env.RESEND_API_KEY?.trim();
-      if (envKey && envKey.startsWith("re_") && !envKey.startsWith("re_8HsM") && !envKey.startsWith("re_1234")) {
-        return envKey;
-      }
-      return Buffer.from("cmVfMnB2bUNQOU1fM01BdkRkQzZ0U2Z5WEF4UUFwcTJ3d0c2", "base64").toString("utf-8");
-    }
-
-    const rawApiKey = getResendKey();
+    const rawApiKey = process.env.RESEND_API_KEY?.trim();
     if (!rawApiKey) {
-      console.log("[EMAIL] RESEND_API_KEY not configured in environment variables.");
+      console.log("[EMAIL] RESEND_API_KEY not configured in environment variables. Email notification skipped.");
       return { success: false, error: "RESEND_API_KEY not configured" };
     }
 
     // STRICT RECIPIENT: huesstay@gmail.com
     const primaryRecipient = "huesstay@gmail.com";
 
-    const fromAddress = process.env.RESEND_FROM_EMAIL?.trim() || "Hues Stay Concierge <onboarding@resend.dev>";
+    const envFrom = process.env.RESEND_FROM_EMAIL?.trim();
+    const isPublicWebmail = !envFrom || /@(gmail\.com|yahoo\.com|outlook\.com|hotmail\.com|icloud\.com)/i.test(envFrom);
+    const fromAddress = isPublicWebmail
+      ? "Hues Stay Concierge <onboarding@resend.dev>"
+      : (envFrom.includes("<") ? envFrom : `Hues Stay Concierge <${envFrom}>`);
+
+    const replyToAddress = "huesstay@gmail.com";
     const timestamp = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
     const dashboardUrl = process.env.APP_URL 
       ? `${process.env.APP_URL.replace(/\/$/, '')}/staff` 
@@ -1088,6 +1087,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
         body: JSON.stringify({
           from: fromAddress,
           to: [primaryRecipient],
+          reply_to: replyToAddress,
           subject: `🛎️ New Request: Room ${roomNumber}`,
           text: plainText,
           html: htmlContent
