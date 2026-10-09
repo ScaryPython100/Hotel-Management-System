@@ -1312,19 +1312,9 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     }
   }
 
-  // Webhook Endpoint for Notifications (Resend Email API notification dispatch)
-  app.post("/api/notify", async (req, res) => {
-    const { roomNumber, items, customMessage, id } = req.body;
-    
-    // Trigger email alert
-    const emailResult = await dispatchStaffEmailForRequest({
-      id: String(id || `notify-${Date.now()}`),
-      roomId: String(roomNumber || "Unknown"),
-      items: Array.isArray(items) ? items : [],
-      customMessage: customMessage || ""
-    });
-    
-    res.json({ success: true, message: "Staff notification processed", email: emailResult });
+  // Webhook Endpoint for Notifications (deprecated in favor of /api/requests)
+  app.post("/api/notify", (req, res) => {
+    res.json({ success: true, message: "Staff notification processed via /api/requests" });
   });
 
   // Ensure request has email dispatched
