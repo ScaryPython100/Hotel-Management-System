@@ -10,8 +10,8 @@ import {
 
 // Public Supabase credentials from client environment
 const rawMeta = typeof import.meta !== "undefined" ? (import.meta as any).env : {};
-const supabaseUrl = (rawMeta?.VITE_SUPABASE_URL || "https://gsavyysjbgxszjauoglf.supabase.co").replace(/\/rest\/v1\/?$/, "");
-const supabaseAnonKey = rawMeta?.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdzYXZ5eXNqYmd4c3pqYXVvZ2xmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMzIzNzQsImV4cCI6MjEwNDgwODM3NH0.bOUIqUUdsxgplSI088CCzPRk5eDWbNms1nANBGsAOwU";
+const supabaseUrl = String(rawMeta?.VITE_SUPABASE_URL || "").trim().replace(/\/rest\/v1\/?$/, "");
+const supabaseAnonKey = String(rawMeta?.VITE_SUPABASE_ANON_KEY || "").trim();
 
 let supabaseClient: SupabaseClient | null = null;
 
@@ -652,16 +652,34 @@ export async function syncInventoryAvailability(
   const autoDepleted = await fetchLiveAutoDepleted();
   const autoDepletedSet = new Set<string>(autoDepleted);
 
-  // 6. Evaluate availability strictly for the 8 target items
+  // 6. Pre-aggregate borrowed and pending counts in a single pass (avoids nested O(N*M) string normalization)
+  const borrowedCounts = new Map<string, number>();
+  for (const b of borrowed) {
+    const key = normalizeReturnableName(b.itemName);
+    borrowedCounts.set(key, (borrowedCounts.get(key) || 0) + 1);
+  }
+
+  const pendingCounts = new Map<string, number>();
+  for (const r of pending) {
+    if (!Array.isArray(r.items)) continue;
+    const seenInReq = new Set<string>();
+    for (const i of r.items) {
+      const key = normalizeReturnableName(i);
+      if (!seenInReq.has(key)) {
+        seenInReq.add(key);
+        pendingCounts.set(key, (pendingCounts.get(key) || 0) + 1);
+      }
+    }
+  }
+
+  // Evaluate availability strictly for the 8 target items
   let hasChanged = false;
   let autoDepletedChanged = false;
   const updatedStatus = { ...currentStatus };
 
   for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
-    const borrowedCount = borrowed.filter(b => normalizeReturnableName(b.itemName) === itemKey).length;
-    const pendingCount = pending.filter(r => 
-      (r.items || []).some(i => normalizeReturnableName(i) === itemKey)
-    ).length;
+    const borrowedCount = borrowedCounts.get(itemKey) || 0;
+    const pendingCount = pendingCounts.get(itemKey) || 0;
 
     const inUse = borrowedCount + pendingCount;
     const limit = limits[itemKey] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;

@@ -74,6 +74,10 @@ export function getSupabase(): SupabaseClient | null {
   return clientInstance;
 }
 
+export function setSupabaseClientForTesting(client: SupabaseClient | null): void {
+  clientInstance = client;
+}
+
 export interface RequestRecord {
   id: string;
   roomId: string;
@@ -112,7 +116,6 @@ export async function saveRequestToSupabase(req: RequestRecord): Promise<{ succe
       return { success: false, error: error.message };
     }
 
-    console.log(`[SUPABASE] Successfully persisted request ${req.id} for Room ${req.roomId}`);
     return { success: true };
   } catch (err: any) {
     console.warn("[SUPABASE] Exception during save:", err?.message || "error");
@@ -222,29 +225,31 @@ export async function fetchRequestsFromSupabase(includeDeleted = false): Promise
       createdAt: Number(row.created_at) || Date.now(),
     }));
 
-    // Deduplicate any accidental duplicate records within a 3-minute window
+    // Deduplicate any accidental duplicate records within a 3-minute window in O(N) time
     const result: RequestRecord[] = [];
     const seenIds = new Set<string>();
+    const seenSignatures = new Map<string, number[]>();
 
     for (const r of mapped) {
       if (!r || !r.roomId) continue;
       if (r.id && seenIds.has(r.id)) continue;
 
-      const rItemsStr = JSON.stringify((r.items || []).slice().sort().map(String));
+      const rItemsStr = JSON.stringify((r.items || []).map(String).sort());
       const rMsg = (r.customMessage || "").trim().toLowerCase();
       const rRoom = String(r.roomId).trim().toLowerCase();
+      const signature = `${rRoom}:::${rItemsStr}:::${rMsg}`;
+      const ts = r.createdAt || 0;
 
-      const dup = result.some(ex => {
-        if (String(ex.roomId).trim().toLowerCase() !== rRoom) return false;
-        const exItems = JSON.stringify((ex.items || []).slice().sort().map(String));
-        if (exItems !== rItemsStr) return false;
-        if ((ex.customMessage || "").trim().toLowerCase() !== rMsg) return false;
-        const diff = Math.abs((ex.createdAt || 0) - (r.createdAt || 0));
-        return diff < 180000;
-      });
+      const existingTimestamps = seenSignatures.get(signature);
+      const isDup = existingTimestamps !== undefined && existingTimestamps.some(exTs => Math.abs(exTs - ts) < 180000);
 
-      if (!dup) {
+      if (!isDup) {
         if (r.id) seenIds.add(r.id);
+        if (existingTimestamps) {
+          existingTimestamps.push(ts);
+        } else {
+          seenSignatures.set(signature, [ts]);
+        }
         result.push(r);
       }
     }

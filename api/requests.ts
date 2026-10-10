@@ -104,12 +104,29 @@ async function reconcileServerlessInventory(supabaseUrl: string, supabaseKey: st
     const autoDepletedSet = new Set<string>(autoDepleted);
     let autoDepletedChanged = false;
 
+    const borCounts = new Map<string, number>();
+    for (const b of activeBorrowed) {
+      const key = normalizeItemName(b.item_name);
+      borCounts.set(key, (borCounts.get(key) || 0) + 1);
+    }
+
+    const pendCounts = new Map<string, number>();
+    for (const r of pendingReqs) {
+      if (!Array.isArray(r.items)) continue;
+      const seenInReq = new Set<string>();
+      for (const i of r.items) {
+        const key = normalizeItemName(i);
+        if (!seenInReq.has(key)) {
+          seenInReq.add(key);
+          pendCounts.set(key, (pendCounts.get(key) || 0) + 1);
+        }
+      }
+    }
+
     let hasChanged = false;
     for (const item of TARGET_AUTO_ITEMS) {
-      const borCount = activeBorrowed.filter(b => normalizeItemName(b.item_name) === item).length;
-      const pendCount = pendingReqs.filter(r => 
-        Array.isArray(r.items) && r.items.some((i: string) => normalizeItemName(i) === item)
-      ).length;
+      const borCount = borCounts.get(item) || 0;
+      const pendCount = pendCounts.get(item) || 0;
 
       const inUse = borCount + pendCount;
       const limit = limits[item] ?? DEFAULT_LIMITS[item] ?? 1;
@@ -301,9 +318,6 @@ export default async function handler(req: any, res: any) {
               if (!r.ok) {
                 const err = await r.text();
                 console.warn(`[RESEND] api/requests dispatch returned status ${r.status}: ${err}`);
-              } else {
-                const d = await r.json().catch(() => ({}));
-                console.log(`[RESEND] api/requests email sent successfully to ${recipient}. ID: ${d.id}`);
               }
             }).catch((err) => {
               console.warn("[RESEND] api/requests dispatch error:", err?.message);

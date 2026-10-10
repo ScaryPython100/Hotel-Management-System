@@ -291,6 +291,17 @@ const serverRooms: Array<{ id: string; roomNumber: string; qrCodeHash: string; s
   { id: "room-602", roomNumber: "602", qrCodeHash: "602", status: "vacant" },
 ];
 
+let serverSuperhostPin: string = (process.env.SUPERHOST_PIN || "9999").trim();
+
+function isAuthorizedSuperhost(req: express.Request): boolean {
+  const headerPin = String(req.headers["x-superhost-pin"] || "").trim();
+  const authHeader = String(req.headers.authorization || "").trim();
+  const bearerPin = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
+  const bodyPin = String(req.body?.pin || req.query?.pin || "").trim();
+  const provided = headerPin || bearerPin || bodyPin;
+  return Boolean(provided && provided === serverSuperhostPin);
+}
+
 async function startServer() {
   app.use(express.json());
 
@@ -300,7 +311,6 @@ async function startServer() {
     if (sbAmenities && typeof sbAmenities === "object") {
       serverAmenitiesStatus = { ...serverAmenitiesStatus, ...sbAmenities };
       saveAmenitiesSettings(serverAmenitiesStatus);
-      console.log("[SERVER] Successfully hydrated amenities status from Supabase:", Object.keys(serverAmenitiesStatus).length, "items");
     }
   } catch (e: any) {
     console.warn("[SERVER] Could not hydrate amenities from Supabase:", e?.message);
@@ -309,28 +319,29 @@ async function startServer() {
 function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   const result: ServerRequest[] = [];
   const seenIds = new Set<string>();
+  const seenSignatures = new Map<string, number[]>();
 
   for (const r of list) {
     if (!r || !r.roomId) continue;
     if (r.id && seenIds.has(r.id)) continue;
 
-    const rItems = (r.items || []).slice().sort().map(String);
-    const rItemsStr = JSON.stringify(rItems);
+    const rItemsStr = JSON.stringify((r.items || []).map(String).sort());
     const rMsg = (r.customMessage || "").trim().toLowerCase();
     const rRoom = String(r.roomId).trim().toLowerCase();
+    const signature = `${rRoom}:::${rItemsStr}:::${rMsg}`;
+    const ts = r.createdAt || 0;
 
-    // Check if duplicate of an existing item in result within 3 minutes
-    const dup = result.some(ex => {
-      if (String(ex.roomId).trim().toLowerCase() !== rRoom) return false;
-      const exItems = (ex.items || []).slice().sort().map(String);
-      if (JSON.stringify(exItems) !== rItemsStr) return false;
-      if ((ex.customMessage || "").trim().toLowerCase() !== rMsg) return false;
-      const diff = Math.abs((ex.createdAt || 0) - (r.createdAt || 0));
-      return diff < 180000;
-    });
+    // Check if duplicate of an existing item in result within 3 minutes in O(1) lookup
+    const existingTimestamps = seenSignatures.get(signature);
+    const dup = existingTimestamps !== undefined && existingTimestamps.some(exTs => Math.abs(exTs - ts) < 180000);
 
     if (!dup) {
       if (r.id) seenIds.add(r.id);
+      if (existingTimestamps) {
+        existingTimestamps.push(ts);
+      } else {
+        seenSignatures.set(signature, [ts]);
+      }
       result.push(r);
     }
   }
@@ -379,7 +390,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       emailedRequestIds.clear();
       saveEmailedRequestIds();
 
-      console.log("[CLEAR-ALL] All requests and borrowed items wiped completely from database and server memory.");
       return res.json({
         success: true,
         message: "All previous requests and borrowed items cleared completely."
@@ -404,7 +414,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     markRequestDeletedFromDashboardInSupabase(id).catch(err => {
       console.warn("[SUPABASE] Mark dismissed flag error:", err?.message || err);
     });
-    console.log(`[REQUESTS] Request ${id} dismissed from dashboard view (remains preserved permanently in Supabase table)`);
     res.json({ success: true, message: "Request dismissed from dashboard view (preserved in Supabase database)" });
   });
 
@@ -433,34 +442,45 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     }
 
     // Avoid duplicate if same room and items within 180 seconds or matching ID
-    const newItemsSorted = JSON.stringify(newReq.items.slice().sort().map(String));
-    const existingReq = serverRequests.find(r => 
-      (r.id && newReq.id && r.id === newReq.id) ||
-      (r.roomId.trim().toLowerCase() === newReq.roomId.trim().toLowerCase() && 
-       JSON.stringify((r.items || []).slice().sort().map(String)) === newItemsSorted &&
-       (r.customMessage || "").trim().toLowerCase() === (newReq.customMessage || "").trim().toLowerCase() &&
-       Math.abs(r.createdAt - newReq.createdAt) < 180000)
-    );
+    const newRoomClean = newReq.roomId.trim().toLowerCase();
+    const newMsgClean = (newReq.customMessage || "").trim().toLowerCase();
+    const newItemsSorted = JSON.stringify(newReq.items.map(String).sort());
+
+    const existingReq = serverRequests.find(r => {
+      if (r.id && newReq.id && r.id === newReq.id) return true;
+      if (Math.abs(r.createdAt - newReq.createdAt) >= 180000) return false;
+      if (r.roomId.trim().toLowerCase() !== newRoomClean) return false;
+      if ((r.customMessage || "").trim().toLowerCase() !== newMsgClean) return false;
+      return JSON.stringify((r.items || []).map(String).sort()) === newItemsSorted;
+    });
 
     if (existingReq) {
       return res.json({ success: true, request: existingReq, isDuplicate: true });
     }
 
-    // Check if any requested item is currently marked out_of_service
-    const unavailableItems = newReq.items.filter(item => {
-      const clean = String(item).toLowerCase().trim();
-      for (const [name, status] of Object.entries(serverAmenitiesStatus)) {
-        if (status === 'out_of_service') {
-          const lowerName = name.toLowerCase().trim();
-          if (lowerName === clean || clean.includes(lowerName) || lowerName.includes(clean)) {
-            return true;
-          }
-          if (clean.includes("glass") && lowerName.includes("glass")) return true;
-          if ((clean.includes("kettle") || clean.includes("teakettle")) && (lowerName.includes("kettle") || lowerName.includes("teakettle"))) return true;
-        }
+    // Check if any requested item is currently marked out_of_service (precompute normalized list once)
+    const outOfServiceNames: string[] = [];
+    for (const [name, st] of Object.entries(serverAmenitiesStatus)) {
+      if (st === "out_of_service") {
+        outOfServiceNames.push(name.toLowerCase().trim());
       }
-      return false;
-    });
+    }
+
+    const unavailableItems = outOfServiceNames.length === 0
+      ? []
+      : newReq.items.filter(item => {
+          const clean = String(item).toLowerCase().trim();
+          const cleanHasGlass = clean.includes("glass");
+          const cleanHasKettle = clean.includes("kettle") || clean.includes("teakettle");
+          for (const lowerName of outOfServiceNames) {
+            if (lowerName === clean || clean.includes(lowerName) || lowerName.includes(clean)) {
+              return true;
+            }
+            if (cleanHasGlass && lowerName.includes("glass")) return true;
+            if (cleanHasKettle && (lowerName.includes("kettle") || lowerName.includes("teakettle"))) return true;
+          }
+          return false;
+        });
 
     if (unavailableItems.length > 0 && !newReq.customMessage) {
       return res.status(400).json({
@@ -537,15 +557,19 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     };
 
     const baseName = extractBaseApplianceName(itemRecord.itemName);
+    const targetRoomClean = itemRecord.roomId.trim().toLowerCase();
 
     // Strictly check for existing active borrowed record to prevent duplicates
-    const existingIdx = serverBorrowed.findIndex(
-      b => b.id === itemRecord.id || 
-          (b.requestId && itemRecord.requestId && b.requestId === itemRecord.requestId && extractBaseApplianceName(b.itemName) === baseName) ||
-          (b.roomId.trim().toLowerCase() === itemRecord.roomId.trim().toLowerCase() && 
-           extractBaseApplianceName(b.itemName) === baseName && 
-           b.status === "borrowed")
-    );
+    const existingIdx = serverBorrowed.findIndex(b => {
+      if (b.id === itemRecord.id) return true;
+      if (b.requestId && itemRecord.requestId && b.requestId === itemRecord.requestId) {
+        return extractBaseApplianceName(b.itemName) === baseName;
+      }
+      if (b.status === "borrowed" && b.roomId.trim().toLowerCase() === targetRoomClean) {
+        return extractBaseApplianceName(b.itemName) === baseName;
+      }
+      return false;
+    });
     if (existingIdx === -1) {
       serverBorrowed.unshift(itemRecord);
     } else {
@@ -644,8 +668,14 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     res.json({ success: true, room: roomObj, rooms: serverRooms });
   });
 
-  // DELETE room
+  // DELETE room (Requires Superhost authentication)
   app.delete("/api/rooms/:roomNumber", (req, res) => {
+    if (!isAuthorizedSuperhost(req)) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized: Superhost authentication required to delete rooms"
+      });
+    }
     const { roomNumber } = req.params;
     const cleanNum = String(roomNumber).trim();
     const idx = serverRooms.findIndex(r => r.roomNumber.toLowerCase() === cleanNum.toLowerCase());
@@ -666,6 +696,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     const stockNum = Math.max(1, parseInt(totalStock, 10) || 1);
     serverInventoryLimits[clean] = stockNum;
     saveInventoryLimits(serverInventoryLimits);
+    const taken = calculateItemTaken(clean);
 
     return res.json({
       success: true,
@@ -674,9 +705,9 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
         name: clean,
         totalStock: stockNum,
         limit: stockNum,
-        taken: calculateItemTaken(clean),
-        inUse: calculateItemTaken(clean),
-        available: Math.max(0, stockNum - calculateItemTaken(clean))
+        taken,
+        inUse: taken,
+        available: Math.max(0, stockNum - taken)
       }
     });
   });
@@ -689,15 +720,16 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     const stockNum = Math.max(1, parseInt(totalStock || limit, 10) || 1);
     serverInventoryLimits[decodedName] = stockNum;
     saveInventoryLimits(serverInventoryLimits);
+    const taken = calculateItemTaken(decodedName);
 
     return res.json({
       success: true,
       name: decodedName,
       totalStock: stockNum,
       limit: stockNum,
-      taken: calculateItemTaken(decodedName),
-      inUse: calculateItemTaken(decodedName),
-      available: Math.max(0, stockNum - calculateItemTaken(decodedName))
+      taken,
+      inUse: taken,
+      available: Math.max(0, stockNum - taken)
     });
   });
 
@@ -726,7 +758,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     saveAutoDepletedItems(serverAutoDepletedItems);
     saveAmenitiesSettings(serverAmenitiesStatus);
     saveAmenitiesToSupabase(serverAmenitiesStatus).catch(() => {});
-    console.log("[SETTINGS] Updated amenities availability:", Object.keys(serverAmenitiesStatus).length, "items");
     return res.json({
       success: true,
       amenities: serverAmenitiesStatus
@@ -744,7 +775,11 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
   // POST save-all settings (instant sub-100ms response so Staff never hangs)
   app.post("/api/settings/save-all", (req, res) => {
-    const { amenities, inventory } = req.body;
+    const { amenities, inventory, pin } = req.body;
+
+    if (typeof pin === "string" && pin.trim().length > 0) {
+      serverSuperhostPin = pin.trim();
+    }
 
     if (amenities && typeof amenities === "object") {
       serverAmenitiesStatus = { ...serverAmenitiesStatus, ...amenities };
@@ -766,7 +801,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       saveInventoryLimits(serverInventoryLimits);
     }
 
-    console.log("[SETTINGS] Saved all settings successfully to disk and server memory");
     return res.json({
       success: true,
       message: "Settings saved successfully",
@@ -813,6 +847,9 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
     // 3. When marked completed, automatically track returnable items in Borrowed section
     if (status === "completed" && found && Array.isArray(found.items)) {
+      const foundRoomClean = found.roomId.trim().toLowerCase();
+      const savePromises: Promise<any>[] = [];
+
       for (const rawItem of found.items) {
         const itemStr = String(rawItem);
         if (isReturnableItem(itemStr)) {
@@ -820,9 +857,9 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
           const baseName = extractBaseApplianceName(canonicalName);
 
           const already = serverBorrowed.some(
-            b => (b.roomId.trim().toLowerCase() === found!.roomId.trim().toLowerCase() &&
-                 extractBaseApplianceName(b.itemName) === baseName &&
-                 b.status === "borrowed")
+            b => b.status === "borrowed" &&
+                 b.roomId.trim().toLowerCase() === foundRoomClean &&
+                 extractBaseApplianceName(b.itemName) === baseName
           );
 
           if (!already) {
@@ -836,18 +873,19 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
             };
             serverBorrowed.unshift(newBor);
             createdBorrowed.push(newBor);
-            // Persist to Supabase borrowed_items table
-            await saveBorrowedToSupabase(newBor).catch(e => {
-              console.warn("[SUPABASE] Save borrowed error:", e?.message || e);
-            });
+            // Persist to Supabase borrowed_items table concurrently
+            savePromises.push(
+              saveBorrowedToSupabase(newBor).catch(e => {
+                console.warn("[SUPABASE] Save borrowed error:", e?.message || e);
+              })
+            );
           }
         }
       }
-    } else if (status === "pending" && found) {
-      // Note: Do not automatically mark physical appliances as returned when a request is reopened.
-      // Physical appliances in guest rooms must only be marked as returned when staff explicitly
-      // clicks "Collect & Return" after retrieving them from the room.
-      console.log(`[REQUESTS] Request ${id} toggled to pending. Keeping active borrowed appliances intact.`);
+
+      if (savePromises.length > 0) {
+        await Promise.all(savePromises);
+      }
     }
 
     reconcileServerAutoAvailability();
@@ -876,7 +914,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     res.type("text/plain").send(SUPABASE_TABLE_SQL);
   });
 
-  // Sync / Backfill all existing requests to Supabase
+  // Sync / Backfill all existing requests to Supabase concurrently
   app.post("/api/supabase/sync", async (req, res) => {
     const requestsToSync: ServerRequest[] = Array.isArray(req.body?.requests) && req.body.requests.length > 0
       ? req.body.requests
@@ -886,8 +924,11 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     let failedCount = 0;
     const errors: string[] = [];
 
-    for (const r of requestsToSync) {
-      const result = await saveRequestToSupabase(r);
+    const results = await Promise.all(
+      requestsToSync.map(r => saveRequestToSupabase(r))
+    );
+
+    for (const result of results) {
       if (result.success) {
         syncedCount++;
       } else {
@@ -916,7 +957,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   async function sendStaffEmailAlert({ roomNumber, items, customMessage }: EmailAlertParams): Promise<{ success: boolean; details?: any; error?: string }> {
     const rawApiKey = process.env.RESEND_API_KEY?.trim();
     if (!rawApiKey) {
-      console.log("[EMAIL] RESEND_API_KEY not configured in environment variables. Email notification skipped.");
       return { success: false, error: "RESEND_API_KEY not configured" };
     }
 
@@ -1074,8 +1114,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 </body>
 </html>`;
 
-    console.log(`[RESEND EMAIL] Preparing notification dispatch for Room ${roomNumber} to primary recipient:`, primaryRecipient);
-
     // Free Resend tier: send to single recipient
     try {
       const resendRes = await fetch("https://api.resend.com/emails", {
@@ -1096,7 +1134,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
       if (resendRes.ok) {
         const data = await resendRes.json();
-        console.log(`[RESEND EMAIL] Successfully dispatched to ${primaryRecipient}! ID:`, data.id);
         return { success: true, details: data };
       }
 
@@ -1168,7 +1205,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       roomIdStr.toLowerCase().includes("setting") ||
       reqId.startsWith("system-")
     ) {
-      console.log(`[EMAIL DISPATCH] Ignored system configuration record (${reqId}, Room: ${roomIdStr})`);
       emailedRequestIds.add(reqId);
       return { success: true, details: "Ignored system configuration record" };
     }
@@ -1176,7 +1212,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     // 1. Check ID-based deduplication (both completed and currently in-flight)
     if (!req.forceResend) {
       if (emailedRequestIds.has(reqId) || inFlightEmailDispatches.has(reqId)) {
-        console.log(`[EMAIL DISPATCH] Skipped duplicate dispatch for request ${reqId} (already emailed or in-flight)`);
         return { success: true, details: "Already notified or dispatch in flight" };
       }
     }
@@ -1187,7 +1222,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     if (!req.forceResend) {
       const lastSentTime = recentFingerprints.get(fingerprint);
       if (lastSentTime && (now - lastSentTime) < 120000) { // 2 minutes window
-        console.log(`[EMAIL DISPATCH] Skipped duplicate dispatch by fingerprint for Room ${roomIdStr} (sent ${Math.round((now - lastSentTime)/1000)}s ago)`);
         emailedRequestIds.add(reqId);
         saveEmailedRequestIds();
         return { success: true, details: "Identical request already notified recently" };
@@ -1199,7 +1233,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     emailedRequestIds.add(reqId);
     recentFingerprints.set(fingerprint, now);
 
-    console.log(`[EMAIL DISPATCH] Triggering notification email for request ${reqId} (Room ${req.roomId})`);
     try {
       const result = await sendStaffEmailAlert({
         roomNumber: req.roomId,
@@ -1209,7 +1242,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
       if (result.success) {
         saveEmailedRequestIds();
-        console.log(`[EMAIL DISPATCH] Successfully sent & tracked email for request ${reqId}`);
       } else {
         console.warn(`[EMAIL DISPATCH] Failed to send email for request ${reqId}:`, result.error);
         if (result.error !== "RESEND_API_KEY not configured") {
@@ -1225,8 +1257,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   }
 
   function startEmailNotificationDaemon() {
-    console.log("[EMAIL DAEMON] Starting Supabase Realtime & Polling Email Watcher...");
-
     const checkSupabaseForNewRequests = async () => {
       try {
         const sb = getSupabase();
@@ -1239,6 +1269,8 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
           .limit(20);
 
         if (error || !data || !Array.isArray(data)) return;
+
+        const dispatchPromises: Promise<any>[] = [];
 
         for (const row of data) {
           const reqId = String(row.id || "");
@@ -1255,15 +1287,20 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
           const isRecent = (Date.now() - createdAt) < (24 * 60 * 60 * 1000);
 
           if (!emailedRequestIds.has(reqId) && !inFlightEmailDispatches.has(reqId) && isRecent) {
-            console.log(`[EMAIL DAEMON] Found un-notified request ${reqId} for Room ${row.room_id} in Supabase!`);
-            await dispatchStaffEmailForRequest({
-              id: reqId,
-              roomId: String(row.room_id),
-              items: Array.isArray(row.items) ? row.items : [],
-              customMessage: row.custom_message || "",
-              createdAt
-            });
+            dispatchPromises.push(
+              dispatchStaffEmailForRequest({
+                id: reqId,
+                roomId: String(row.room_id),
+                items: Array.isArray(row.items) ? row.items : [],
+                customMessage: row.custom_message || "",
+                createdAt
+              })
+            );
           }
+        }
+
+        if (dispatchPromises.length > 0) {
+          await Promise.allSettled(dispatchPromises);
         }
       } catch (err: any) {
         console.warn("[EMAIL DAEMON] Polling check warning:", err?.message || err);
@@ -1294,7 +1331,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
               }
 
               if (!emailedRequestIds.has(reqId) && !inFlightEmailDispatches.has(reqId)) {
-                console.log(`[EMAIL REALTIME] Instant notification for newly inserted request ${row.id} Room ${row.room_id}`);
                 await dispatchStaffEmailForRequest({
                   id: reqId,
                   roomId: String(row.room_id),

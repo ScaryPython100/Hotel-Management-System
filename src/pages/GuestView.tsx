@@ -8,8 +8,7 @@ import {
   fetchLiveBorrowed, 
   fetchLiveRequests, 
   fetchLiveInventoryLimits,
-  fetchLiveDeletedItems,
-  syncInventoryAvailability 
+  fetchLiveDeletedItems
 } from "../lib/supabaseClient";
 import { 
   COMMON_ITEMS, 
@@ -22,9 +21,12 @@ import {
   normalizeReturnableName,
   isTargetAutoUnavailableItem
 } from "../types";
-import { cn } from "../lib/utils";
 import toast, { Toaster } from "react-hot-toast";
-import { Check, Loader2, Info, ArrowRight, BedDouble, Trash2 } from "lucide-react";
+import { Loader2, Info } from "lucide-react";
+import RoomSelectorScreen from "../components/guest/RoomSelectorScreen";
+import RequestSuccessScreen from "../components/guest/RequestSuccessScreen";
+import GuestDetailsForm from "../components/guest/GuestDetailsForm";
+import AmenityGridSection from "../components/guest/AmenityGridSection";
 
 // Fast local resolver: resolves in 0 milliseconds
 function resolveRoomInstantly(hash?: string): string | null {
@@ -214,8 +216,27 @@ export default function GuestView() {
           ...(liveLimits || {})
         };
 
-        const activeBorrowed = (liveBor || []).filter(b => b.status === "borrowed");
-        const pendingReqs = (liveReqs || []).filter(r => r.status === "pending");
+        // Pre-aggregate borrowed and pending request counts in a single pass
+        const borrowedCounts = new Map<string, number>();
+        for (const b of liveBor || []) {
+          if (b.status === "borrowed") {
+            const norm = normalizeReturnableName(b.itemName);
+            borrowedCounts.set(norm, (borrowedCounts.get(norm) || 0) + 1);
+          }
+        }
+
+        const pendingCounts = new Map<string, number>();
+        for (const r of liveReqs || []) {
+          if (r.status === "pending") {
+            const matchedCanonical = new Set<string>();
+            for (const i of r.items || []) {
+              matchedCanonical.add(normalizeReturnableName(i));
+            }
+            for (const norm of matchedCanonical) {
+              pendingCounts.set(norm, (pendingCounts.get(norm) || 0) + 1);
+            }
+          }
+        }
 
         const invMap: Record<string, { inUse: number, limit: number }> = {};
 
@@ -228,12 +249,12 @@ export default function GuestView() {
 
         for (const itemKey of allItemKeys) {
           const canonical = normalizeReturnableName(itemKey);
-          const borrowedCount = activeBorrowed.filter(b => 
-            normalizeReturnableName(b.itemName) === canonical || normalizeReturnableName(b.itemName) === itemKey
-          ).length;
-          const pendingCount = pendingReqs.filter(r => 
-            (r.items || []).some(i => normalizeReturnableName(i) === canonical || normalizeReturnableName(i) === itemKey)
-          ).length;
+          const borrowedCount =
+            (borrowedCounts.get(canonical) || 0) +
+            (canonical !== itemKey ? borrowedCounts.get(itemKey) || 0 : 0);
+          const pendingCount =
+            (pendingCounts.get(canonical) || 0) +
+            (canonical !== itemKey ? pendingCounts.get(itemKey) || 0 : 0);
 
           const inUse = borrowedCount + pendingCount;
           const limit = limits[itemKey] ?? limits[canonical] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;
@@ -525,7 +546,6 @@ export default function GuestView() {
         body: JSON.stringify(requestData)
       }).catch(err => console.warn("Server API sync:", err));
 
-
       // Limit waiting time to maximum 600ms so guest gets immediate feedback
       await Promise.race([
         firestoreTask,
@@ -580,193 +600,44 @@ export default function GuestView() {
     );
   }
 
-  // If room number couldn't be auto-detected, show elegant room selector instead of blank/dead end
+  // If room number couldn't be auto-detected, show elegant room selector
   if (!roomNumber) {
-    const quickRooms = ["101", "102", "103", "104", "201", "202"];
-
     return (
-      <div className="min-h-screen bg-[#F9F7F4] flex flex-col items-center justify-center p-6 text-center text-[#2D2926] font-sans">
-        <div className="max-w-md w-full bg-white border border-[#E5E1DB] p-8 shadow-sm">
-          <div className="w-12 h-12 bg-[#F2EFE9] text-[#A68966] mx-auto rounded-full flex items-center justify-center mb-4 border border-[#E5E1DB]">
-            <BedDouble className="w-6 h-6" />
-          </div>
-          <h2 className="text-3xl font-serif italic mb-2">Welcome to Hues Stay</h2>
-          <p className="text-[#8C857D] text-xs uppercase tracking-[0.15em] mb-6">
-            Please confirm your room number
-          </p>
-
-          <div className="grid grid-cols-3 gap-2 mb-6">
-            {quickRooms.map(rm => (
-              <button
-                key={rm}
-                type="button"
-                onClick={() => handleManualRoomSelect(rm)}
-                className="py-3 px-2 border border-[#E5E1DB] bg-[#FAF8F5] hover:bg-[#A68966] hover:text-white font-serif text-lg transition-colors"
-              >
-                Room {rm}
-              </button>
-            ))}
-          </div>
-
-          <form 
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleManualRoomSelect(manualRoomInput);
-            }} 
-            className="flex gap-2"
-          >
-            <input
-              type="text"
-              value={manualRoomInput}
-              onChange={(e) => setManualRoomInput(e.target.value)}
-              placeholder="Or enter room number"
-              className="flex-1 border border-[#E5E1DB] px-4 py-2.5 text-sm focus:outline-none focus:border-[#A68966]"
-            />
-            <button
-              type="submit"
-              disabled={!manualRoomInput.trim()}
-              className="bg-[#2D2926] text-white px-4 py-2.5 text-xs uppercase tracking-wider hover:bg-black disabled:opacity-50 flex items-center gap-1"
-            >
-              Enter <ArrowRight className="w-3.5 h-3.5" />
-            </button>
-          </form>
-        </div>
-      </div>
+      <RoomSelectorScreen
+        manualRoomInput={manualRoomInput}
+        onManualRoomInputChange={setManualRoomInput}
+        onSelectRoom={handleManualRoomSelect}
+      />
     );
   }
 
   if (isSuccess) {
     return (
-      <div className="min-h-screen bg-[#F9F7F4] flex flex-col items-center justify-center p-6 text-center text-[#2D2926] font-sans">
-        <div className="w-20 h-20 bg-[#F2EFE9] text-[#A68966] rounded-full flex items-center justify-center mb-6 border border-[#E5E1DB] shadow-xs">
-          <Check className="w-10 h-10 stroke-[2.5]" />
-        </div>
-        <h2 className="text-3xl font-serif italic mb-2">Request Received</h2>
-        <p className="text-[#8C857D] mb-6 max-w-md text-sm">
-          Our housekeeping and guest service team has been notified and will attend to Room {roomNumber} promptly.
-        </p>
-
-        {selectedItems.length > 0 && (
-          <div className="bg-white border border-[#E5E1DB] p-4 mb-8 max-w-sm w-full text-left shadow-2xs">
-            <span className="text-[10px] uppercase tracking-widest text-[#8C857D] font-mono block mb-2 font-semibold">
-              Requested Items
-            </span>
-            <ul className="space-y-1.5 text-sm text-[#2D2926]">
-              {selectedItems.map(item => {
-                const comingSoonItems = [
-                  "Laptop Table",
-                  "Hair Dryer",
-                  "Leg Massager (Paid)",
-                  "Infrared Heat Therapy Lamp (Paid)",
-                  "Glasses (Set of 2)"
-                ];
-                const displayName = comingSoonItems.includes(item) ? `${item}` : item;
-                
-                const emojiMap: Record<string, string> = {
-                  "Iron Box": "👕",
-                  "Kettle": "🫖",
-                  "Hair Dryer": "💇‍♀️",
-                  "Laptop Table": "💻",
-                  "Leg Massager (Paid)": "🦵",
-                  "Glasses (Set of 2)": "🥃",
-                  "USB 3.0 Cable + Adaptor": "🔌",
-                  "Infrared Heat Therapy Lamp (Paid)": "💡"
-                };
-                const emoji = emojiMap[item];
-
-                return (
-                  <li key={item} className="flex justify-between items-center py-1 border-b border-[#F2EFE9] last:border-0">
-                    <span className="font-serif">
-                      {emoji && <span className="mr-1.5">{emoji}</span>}
-                      {displayName}
-                    </span>
-                    <span className="font-mono text-xs text-[#A68966] bg-[#FAF8F5] px-2 py-0.5 border border-[#EBE7E1] rounded-xs">
-                      Requested
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        )}
-
-        <div className="flex flex-col sm:flex-row gap-3">
-          <button
-            onClick={() => {
-              setIsSuccess(false);
-              setSelectedItems([]);
-              setCustomMessage("");
-            }}
-            className="px-8 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors rounded-none cursor-pointer"
-          >
-            Make Another Request
-          </button>
-          <button
-            type="button"
-            onClick={handleCancelRequest}
-            className="px-6 py-4 bg-white text-red-700 border border-red-200 font-medium uppercase tracking-[0.2em] text-xs hover:bg-red-50 transition-colors flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5 text-red-500" />
-            Cancel / Remove Request
-          </button>
-        </div>
-      </div>
+      <RequestSuccessScreen
+        roomNumber={roomNumber}
+        selectedItems={selectedItems}
+        onMakeAnotherRequest={() => {
+          setIsSuccess(false);
+          setSelectedItems([]);
+          setCustomMessage("");
+        }}
+        onCancelRequest={handleCancelRequest}
+      />
     );
   }
 
   if (showGuestForm) {
     return (
-      <div className="min-h-screen bg-[#FDFBF7] flex flex-col items-center pt-12 px-6">
-        <Toaster position="top-center" />
-        <div className="max-w-md w-full bg-white border border-[#E5E1DB] p-8 shadow-sm text-center">
-          <h2 className="text-3xl font-serif italic mb-2">Guest Details</h2>
-          <p className="text-[#8C857D] text-sm mb-6">
-            Please provide your details to confirm your request for Room {roomNumber}.
-          </p>
-          <form onSubmit={handleFinalSubmit}>
-            <div className="space-y-4 mb-8 text-left">
-              <div>
-                <label className="block text-[10px] uppercase tracking-widest text-[#8C857D] font-mono mb-2 font-semibold">Guest Name</label>
-                <input
-                  type="text"
-                  required
-                  value={guestName}
-                  onChange={e => setGuestName(e.target.value)}
-                  className="w-full border border-[#E5E1DB] p-3 text-sm focus:outline-none focus:border-[#A68966] bg-[#FAF8F5] transition-colors"
-                  placeholder="Enter your name"
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] uppercase tracking-widest text-[#8C857D] font-mono mb-2 font-semibold">Phone Number</label>
-                <input
-                  type="tel"
-                  required
-                  value={phoneNumber}
-                  onChange={e => setPhoneNumber(e.target.value)}
-                  className="w-full border border-[#E5E1DB] p-3 text-sm focus:outline-none focus:border-[#A68966] bg-[#FAF8F5] transition-colors"
-                  placeholder="Enter your phone number"
-                />
-              </div>
-            </div>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <button
-                type="button"
-                onClick={() => setShowGuestForm(false)}
-                className="flex-1 py-4 bg-white text-[#2D2926] border border-[#E5E1DB] font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#F2EFE9] transition-colors cursor-pointer"
-              >
-                Back
-              </button>
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                className="flex-1 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors flex justify-center items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
-              >
-                {isSubmitting ? "Sending..." : "Confirm Request"}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
+      <GuestDetailsForm
+        roomNumber={roomNumber}
+        guestName={guestName}
+        onGuestNameChange={setGuestName}
+        phoneNumber={phoneNumber}
+        onPhoneNumberChange={setPhoneNumber}
+        isSubmitting={isSubmitting}
+        onBack={() => setShowGuestForm(false)}
+        onSubmit={handleFinalSubmit}
+      />
     );
   }
 
@@ -804,173 +675,16 @@ export default function GuestView() {
             </div>
           </div>
         </div>
+
         <form onSubmit={handleProceedToGuestForm} className="space-y-8">
-          
-          <section>
-            <h2 className="text-xl font-serif mb-4 flex items-center">
-              Daily Service Requests
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {COMMON_ITEMS.filter(i => 
-                i.category === 'Service' && 
-                !deletedItems.includes(i.name) &&
-                !i.name.toLowerCase().includes('wifi') && 
-                !i.name.toLowerCase().includes('supervisor')
-              ).map((itemObj) => {
-                const item = itemObj.name;
-                const isSelected = selectedItems.includes(item);
-                const isOutOfService = checkIsItemOutOfService(item);
-                const isDisabled = isOutOfService;
-
-                return (
-                  <div
-                    key={item}
-                    onClick={() => {
-                      if (!isDisabled) {
-                        toggleItem(item);
-                      } else {
-                        toast.error(`${item} is currently out of service.`);
-                      }
-                    }}
-                    className={cn(
-                      "bg-white border p-5 flex flex-col justify-between text-left transition-all duration-200 min-h-[90px] h-auto rounded-none relative gap-3 select-none",
-                      isSelected
-                        ? "bg-[#F2EFE9] border-[#A68966] text-[#2D2926] shadow-xs"
-                        : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]",
-                      isDisabled ? "opacity-50 cursor-not-allowed hover:bg-white border-[#E5E1DB]" : "cursor-pointer"
-                    )}
-                  >
-                    <div className="flex justify-between items-start w-full gap-2">
-                      <span className="font-serif text-base md:text-lg leading-tight">{item}</span>
-                      <div
-                        className={cn(
-                          "w-5 h-5 flex items-center justify-center shrink-0 border rounded-xs mt-0.5 transition-colors",
-                          isSelected ? "border-[#A68966] bg-[#A68966]" : "border-[#E5E1DB]",
-                          isDisabled && "border-[#E5E1DB] bg-gray-100"
-                        )}
-                      >
-                        {isSelected && <Check className="w-3 h-3 text-white stroke-[3]" />}
-                      </div>
-                    </div>
-
-                    {isOutOfService && (
-                      <span className="text-[10px] text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 uppercase tracking-wider font-semibold rounded-sm inline-block w-fit">
-                        Unavailable
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-serif mb-4 flex items-center">
-              Inventory Item Requests
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {(() => {
-                const deletedSet = new Set(deletedItems);
-                const itemsList: Array<{ name: string; isLimited: boolean }> = [
-                  ...COMMON_ITEMS.filter(i => i.category === 'Item' && !deletedSet.has(i.name)).map(i => ({ name: i.name, isLimited: !!i.isLimited }))
-                ];
-                Object.keys(inventory).forEach(invName => {
-                  // Filter out duplicate aliases, deleted items, and corrupt data from showing up in the UI
-                  const lower = invName.toLowerCase().trim();
-                  if (
-                    deletedSet.has(invName) ||
-                    lower === "teakettle" || 
-                    lower === "glasses" || 
-                    lower === "water glasses" || 
-                    lower === "water glass" ||
-                    lower.includes("(qty:") ||
-                    lower.includes("qty:")
-                  ) return;
-
-                  if (!itemsList.some(i => i.name === invName)) {
-                    itemsList.push({ name: invName, isLimited: true });
-                  }
-                });
-
-                return itemsList.map((itemObj) => {
-                  const item = itemObj.name;
-                  const isSelected = selectedItems.includes(item);
-                  const inv = getInventoryData(item);
-                  const neededUnits = getItemUnitConsumption(item);
-                  const availableUnits = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
-                  const isOutOfStock = (itemObj.isLimited || inv !== undefined) && inv && (availableUnits < neededUnits);
-                  const isOutOfService = checkIsItemOutOfService(item);
-                  const isDisabled = isOutOfStock || isOutOfService;
-
-                  const comingSoonItems = [
-                    "Laptop Table",
-                    "Hair Dryer",
-                    "Leg Massager (Paid)",
-                    "Infrared Heat Therapy Lamp (Paid)",
-                    "Glasses (Set of 2)"
-                  ];
-                  const isComingSoon = comingSoonItems.includes(item);
-                  const displayName = isComingSoon ? `${item}` : item;
-
-                  const emojiMap: Record<string, string> = {
-                    "Iron Box": "👕",
-                    "Kettle": "🫖",
-                    "Hair Dryer": "💇‍♀️",
-                    "Laptop Table": "💻",
-                    "Leg Massager (Paid)": "🦵",
-                    "Glasses (Set of 2)": "🥃",
-                    "USB 3.0 Cable + Adaptor": "🔌",
-                    "Infrared Heat Therapy Lamp (Paid)": "💡"
-                  };
-                  const emoji = emojiMap[item];
-
-                  return (
-                    <div
-                      key={item}
-                      onClick={() => {
-                        if (isDisabled) {
-                          toast.error(`${displayName} is currently unavailable.`);
-                          return;
-                        }
-                        toggleItem(item);
-                      }}
-                      className={cn(
-                        "bg-white border p-5 flex flex-col justify-between text-left transition-all duration-200 min-h-[90px] h-auto rounded-none relative gap-3 select-none",
-                        isSelected
-                          ? "bg-[#F2EFE9] border-[#A68966] text-[#2D2926] shadow-xs"
-                          : "border-[#E5E1DB] text-[#2D2926] hover:bg-[#F2EFE9]",
-                        isDisabled 
-                          ? "opacity-60 cursor-not-allowed bg-[#FAF9F7] border-dashed border-[#D5D1CB] hover:bg-[#FAF9F7]" 
-                          : "cursor-pointer"
-                      )}
-                    >
-                      <div className="flex justify-between items-start w-full gap-2">
-                        <span className="font-serif text-base md:text-lg leading-tight block">
-                          {emoji && <span className="mr-2 text-xl inline-block">{emoji}</span>}
-                          {displayName}
-                        </span>
-                        <div
-                          className={cn(
-                            "w-5 h-5 flex items-center justify-center shrink-0 border rounded-xs mt-0.5 transition-colors",
-                            isSelected ? "border-[#A68966] bg-[#A68966]" : "border-[#E5E1DB]",
-                            isDisabled && "border-[#E5E1DB] bg-gray-100"
-                          )}
-                        >
-                          {isSelected && <Check className="w-3 h-3 text-white stroke-[3]" />}
-                        </div>
-                      </div>
-
-                      {isDisabled && (
-                        <span className="text-[10px] text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 uppercase tracking-wider font-semibold rounded-sm inline-block w-fit">
-                          Unavailable
-                        </span>
-                      )}
-                    </div>
-                  );
-                });
-              })()}
-            </div>
-          </section>
+          <AmenityGridSection
+            deletedItems={deletedItems}
+            selectedItems={selectedItems}
+            inventory={inventory}
+            getInventoryData={getInventoryData}
+            checkIsItemOutOfService={checkIsItemOutOfService}
+            onToggleItem={toggleItem}
+          />
 
           <section>
             <h2 className="text-xl font-serif mb-4">Other Requests</h2>

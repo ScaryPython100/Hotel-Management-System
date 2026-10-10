@@ -560,19 +560,19 @@ export default function StaffSettings() {
           }
         }
 
-        // Firestore sync
+        // Firestore sync (concurrent updates)
         (async () => {
           try {
             await setDoc(doc(db, "settings", "amenities"), amenityStatus, { merge: true });
           } catch (e) {}
 
           try {
-            for (const name of allItemNames) {
-              const invData = inventoryMap[name];
-              if (invData?.id) {
-                await updateDoc(doc(db, "inventory", invData.id), { limit: invData.limit });
-              }
-            }
+            await Promise.all(
+              allItemNames
+                .map(name => inventoryMap[name])
+                .filter((invData): invData is { id: string; limit: number; inUse: number } => Boolean(invData?.id))
+                .map(invData => updateDoc(doc(db, "inventory", invData.id), { limit: invData.limit }))
+            );
           } catch (e) {}
         })();
       }, 0);
