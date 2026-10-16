@@ -843,21 +843,21 @@ export default function GuestView() {
           </div>
 
           {/* Hotel Key Info Cards: WiFi, Supervisor, Water Dispensers, Self Service Kitchen */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 sm:gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3">
             {/* WiFi */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
-              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
-                <Wifi className="w-3.5 h-3.5" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider">WiFi Password</span>
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs min-w-0">
+              <div className="flex items-center justify-center gap-1 text-[#A68966] mb-1 min-w-0 w-full">
+                <Wifi className="w-3.5 h-3.5 shrink-0" />
+                <span className="text-[9.5px] sm:text-[10px] font-semibold uppercase tracking-wider truncate">WiFi Password</span>
               </div>
-              <div className="flex items-center justify-center gap-1.5 font-mono font-bold text-xs sm:text-sm text-[#2D2926]">
+              <div className="flex items-center justify-center gap-1 font-mono font-bold text-xs sm:text-sm text-[#2D2926]">
                 <span>HuesStay123@</span>
                 <button
                   type="button"
                   onClick={handleCopyWifi}
                   title="Copy WiFi Password"
                   aria-label="Copy WiFi Password"
-                  className="p-1 text-[#A68966] hover:text-[#8E7455] transition-colors cursor-pointer inline-flex items-center"
+                  className="p-1 text-[#A68966] hover:text-[#8E7455] transition-colors cursor-pointer inline-flex items-center shrink-0"
                 >
                   {copiedWifi ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5" />}
                 </button>
@@ -865,12 +865,12 @@ export default function GuestView() {
             </div>
 
             {/* Supervisor */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
-              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
-                <Phone className="w-3.5 h-3.5" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider">Supervisor</span>
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs min-w-0">
+              <div className="flex items-center justify-center gap-1 text-[#A68966] mb-1 min-w-0 w-full">
+                <Phone className="w-3.5 h-3.5 shrink-0" />
+                <span className="text-[9.5px] sm:text-[10px] font-semibold uppercase tracking-wider truncate">Supervisor</span>
               </div>
-              <div className="flex items-center justify-center gap-1.5 font-mono font-bold text-xs sm:text-sm text-[#2D2926]">
+              <div className="flex items-center justify-center gap-1 font-mono font-bold text-xs sm:text-sm text-[#2D2926]">
                 <a href="tel:8431995152" className="hover:underline">
                   8431995152
                 </a>
@@ -878,7 +878,7 @@ export default function GuestView() {
                   href="tel:8431995152"
                   title="Call Supervisor"
                   aria-label="Call Supervisor"
-                  className="p-1 text-[#A68966] hover:text-[#8E7455] transition-colors inline-flex items-center"
+                  className="p-1 text-[#A68966] hover:text-[#8E7455] transition-colors inline-flex items-center shrink-0"
                 >
                   <Phone className="w-3.5 h-3.5" />
                 </a>
@@ -886,10 +886,10 @@ export default function GuestView() {
             </div>
 
             {/* Water Dispensers */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
-              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs min-w-0">
+              <div className="flex items-center justify-center gap-1 text-[#A68966] mb-1 min-w-0 w-full">
                 <Droplets className="w-3.5 h-3.5 shrink-0" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap">Water Dispensers</span>
+                <span className="text-[9.5px] sm:text-[10px] font-semibold uppercase tracking-wider truncate">Water Dispensers</span>
               </div>
               <div className="font-serif text-xs sm:text-sm text-[#2D2926] font-medium leading-tight">
                 G, 3rd & Terrace
@@ -897,10 +897,10 @@ export default function GuestView() {
             </div>
 
             {/* Self Service Kitchen */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
-              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs min-w-0">
+              <div className="flex items-center justify-center gap-1 text-[#A68966] mb-1 min-w-0 w-full">
                 <Utensils className="w-3.5 h-3.5 shrink-0" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap">Self Service Kitchen</span>
+                <span className="text-[9.5px] sm:text-[10px] font-semibold uppercase tracking-wider truncate">Self Service Kitchen</span>
               </div>
               <div className="font-serif text-xs sm:text-sm text-[#2D2926] font-medium leading-tight">
                 Ground Floor
@@ -946,7 +946,7 @@ export default function GuestView() {
 
               <button
                 type="button"
-                onClick={() => handleQuickAction("extend")}
+                onClick={() => handleQuickAction("extension")}
                 className={cn(
                   "py-3.5 px-4 border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs select-none",
                   selectedItems.includes("Request Stay Extension")
@@ -968,15 +968,15 @@ export default function GuestView() {
             <button
               type="button"
               onClick={() => setActiveTab("daily")}
-              className={`flex-1 py-3 px-2 text-xs font-semibold tracking-wider uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+              className={`flex-1 min-w-0 py-2.5 sm:py-3 px-1 sm:px-2 text-[10px] sm:text-xs font-semibold tracking-tight sm:tracking-wider uppercase transition-all flex items-center justify-center gap-1 cursor-pointer text-center ${
                 activeTab === "daily"
                   ? "bg-[#2D2926] text-white shadow-xs"
                   : "text-[#8C857D] hover:text-[#2D2926] hover:bg-[#FAF8F5]"
               }`}
             >
-              <span>1. Daily Services</span>
+              <span className="truncate">1. Daily Services</span>
               {tab1Count > 0 && (
-                <span className={`text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold ${
+                <span className={`text-[9px] sm:text-[10px] min-w-4 h-4 px-1 rounded-full flex items-center justify-center font-bold shrink-0 ${
                   activeTab === "daily" ? "bg-[#A68966] text-white" : "bg-[#2D2926] text-white"
                 }`}>
                   {tab1Count}
@@ -987,15 +987,16 @@ export default function GuestView() {
             <button
               type="button"
               onClick={() => setActiveTab("returnable")}
-              className={`flex-1 py-3 px-2 text-xs font-semibold tracking-wider uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+              className={`flex-1 min-w-0 py-2.5 sm:py-3 px-1 sm:px-2 text-[10px] sm:text-xs font-semibold tracking-tight sm:tracking-wider uppercase transition-all flex items-center justify-center gap-1 cursor-pointer text-center ${
                 activeTab === "returnable"
                   ? "bg-[#2D2926] text-white shadow-xs"
                   : "text-[#8C857D] hover:text-[#2D2926] hover:bg-[#FAF8F5]"
               }`}
             >
-              <span>2. Returnable Items</span>
+              <span className="truncate hidden xs:inline">2. Returnables</span>
+              <span className="truncate xs:hidden">2. Returnables</span>
               {tab2Count > 0 && (
-                <span className={`text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold ${
+                <span className={`text-[9px] sm:text-[10px] min-w-4 h-4 px-1 rounded-full flex items-center justify-center font-bold shrink-0 ${
                   activeTab === "returnable" ? "bg-[#A68966] text-white" : "bg-[#2D2926] text-white"
                 }`}>
                   {tab2Count}
@@ -1006,15 +1007,15 @@ export default function GuestView() {
             <button
               type="button"
               onClick={() => setActiveTab("fnb")}
-              className={`flex-1 py-3 px-2 text-xs font-semibold tracking-wider uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+              className={`flex-1 min-w-0 py-2.5 sm:py-3 px-1 sm:px-2 text-[10px] sm:text-xs font-semibold tracking-tight sm:tracking-wider uppercase transition-all flex items-center justify-center gap-1 cursor-pointer text-center ${
                 activeTab === "fnb"
                   ? "bg-[#2D2926] text-white shadow-xs"
                   : "text-[#8C857D] hover:text-[#2D2926] hover:bg-[#FAF8F5]"
               }`}
             >
-              <span>3. F&B Essentials</span>
+              <span className="truncate">3. F&B Essentials</span>
               {tab3Count > 0 && (
-                <span className={`text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold ${
+                <span className={`text-[9px] sm:text-[10px] min-w-4 h-4 px-1 rounded-full flex items-center justify-center font-bold shrink-0 ${
                   activeTab === "fnb" ? "bg-[#A68966] text-white" : "bg-[#2D2926] text-white"
                 }`}>
                   {tab3Count}
