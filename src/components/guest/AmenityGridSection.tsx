@@ -79,16 +79,24 @@ export default function AmenityGridSection({
   );
 
   const [itemQuantities, setItemQuantities] = useState<Record<string, number>>({
+    "Maggi": 1,
+    "Eggs": 2,
+    "Coffee Sachet": 2,
+    "Soft Drinks (300mL)": 1,
+    "Toned Milk": 1,
+    "Masala Box": 1,
+    "Set of Plates": 1,
+    "Set of Cups/Bowls": 1,
+    "Set of Glasses": 1,
+    "Empty Water Bottle": 1,
+    "Cooking Oil Dispenser": 1,
+    // Backward compatibility:
     "Maggi (₹20)": 1,
     "Eggs (₹10)": 2,
     "Coffee Sachet (₹5 per sachet)": 2,
     "Soft Drinks (₹50)": 1,
     "Toned Milk 200/500 mL (₹30)": 1,
-    "Set of Plates": 1,
-    "Set of Cups/Bowls": 1,
-    "Set of Glasses": 1,
-    "Empty Water Bottle": 1,
-    "Cooking Oil Dispenser": 1
+    "Masala Box (₹50)": 1
   });
 
   const getQty = (baseName: string) => itemQuantities[baseName] || 1;
@@ -119,13 +127,26 @@ export default function AmenityGridSection({
       const isCokeOut = amenitiesStatus["Soft Drinks - Coke"] === "out_of_service";
       const isPepsiOut = amenitiesStatus["Soft Drinks - Pepsi"] === "out_of_service";
       const flavor = isCokeOut && !isPepsiOut ? "Pepsi" : (isPepsiOut && !isCokeOut ? "Coke" : softDrinkOption);
-      return qty > 1 ? `Soft Drinks (${flavor}) (₹50) (qty: ${qty})` : `Soft Drinks (${flavor}) (₹50)`;
+      return qty > 1 ? `Soft Drinks (300mL) (${flavor}) (₹50 Per Can) (qty: ${qty})` : `Soft Drinks (300mL) (${flavor}) (₹50 Per Can)`;
     }
     if (baseName.includes("Toned Milk")) {
       const is200Out = amenitiesStatus["Toned Milk - 200 mL"] === "out_of_service";
       const is500Out = amenitiesStatus["Toned Milk - 500 mL"] === "out_of_service";
       const size = is200Out && !is500Out ? "500 mL" : (is500Out && !is200Out ? "200 mL" : tonedMilkOption);
-      return qty > 1 ? `Toned Milk (${size}) (₹30) (qty: ${qty})` : `Toned Milk (${size}) (₹30)`;
+      const price = size === "500 mL" ? 40 : 20;
+      return qty > 1 ? `Toned Milk (${size}) (₹${price}) (qty: ${qty})` : `Toned Milk (${size}) (₹${price})`;
+    }
+    if (baseName === "Maggi") {
+      return qty > 1 ? `Maggi (₹20 Per Pack) (qty: ${qty})` : `Maggi (₹20 Per Pack)`;
+    }
+    if (baseName === "Eggs") {
+      return qty > 1 ? `Eggs (₹10 Per Egg) (qty: ${qty})` : `Eggs (₹10 Per Egg)`;
+    }
+    if (baseName === "Coffee Sachet") {
+      return qty > 1 ? `Coffee Sachet (₹5 / sachet) (qty: ${qty})` : `Coffee Sachet (₹5 / sachet)`;
+    }
+    if (baseName === "Masala Box") {
+      return qty > 1 ? `Masala Box (₹50) (qty: ${qty})` : `Masala Box (₹50)`;
     }
     if (qty > 1) {
       return `${baseName} (qty: ${qty})`;
@@ -528,7 +549,7 @@ export default function AmenityGridSection({
                               if (selected) {
                                 onUpdateItemString(
                                   selectedItems.find(s => s.toLowerCase().includes("soft drink")) || "",
-                                  formatItemSelectionString("Soft Drinks (₹50)", qty)
+                                  formatItemSelectionString("Soft Drinks (300mL)", qty)
                                 );
                               }
                             }}
@@ -552,7 +573,7 @@ export default function AmenityGridSection({
                               if (selected) {
                                 onUpdateItemString(
                                   selectedItems.find(s => s.toLowerCase().includes("soft drink")) || "",
-                                  formatItemSelectionString("Soft Drinks (₹50)", qty)
+                                  formatItemSelectionString("Soft Drinks (300mL)", qty)
                                 );
                               }
                             }}
@@ -588,7 +609,7 @@ export default function AmenityGridSection({
                               if (selected) {
                                 onUpdateItemString(
                                   selectedItems.find(s => s.toLowerCase().includes("toned milk")) || "",
-                                  formatItemSelectionString("Toned Milk 200/500 mL (₹30)", qty)
+                                  formatItemSelectionString("Toned Milk", qty)
                                 );
                               }
                             }}
@@ -612,7 +633,7 @@ export default function AmenityGridSection({
                               if (selected) {
                                 onUpdateItemString(
                                   selectedItems.find(s => s.toLowerCase().includes("toned milk")) || "",
-                                  formatItemSelectionString("Toned Milk 200/500 mL (₹30)", qty)
+                                  formatItemSelectionString("Toned Milk", qty)
                                 );
                               }
                             }}
@@ -632,11 +653,17 @@ export default function AmenityGridSection({
                     )}
 
                     <div className="pt-2 border-t border-[#E5E1DB]/60 flex items-center justify-between">
-                      {itemObj.badge && (
-                        <span className="text-[10px] font-bold text-[#A68966] bg-[#FAF8F5] border border-[#E5E1DB] px-2 py-0.5">
-                          {itemObj.badge}
-                        </span>
-                      )}
+                      {(() => {
+                        let badgeText = itemObj.badge;
+                        if (isTonedMilk) {
+                          badgeText = activeTonedMilkSize === "500 mL" ? "₹40 (500mL)" : "₹20 (200mL)";
+                        }
+                        return badgeText ? (
+                          <span className="text-[11px] font-bold text-[#8E7455] bg-[#F7F4EF] border border-[#D9D0C3] px-2.5 py-1 rounded-xs shadow-2xs">
+                            {badgeText}
+                          </span>
+                        ) : null;
+                      })()}
 
                       {/* Quantity Stepper for food items */}
                       <div

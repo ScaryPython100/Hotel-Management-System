@@ -77,34 +77,34 @@ export const PAGE_3_FNB_DEPOSIT_ITEMS: AmenityItem[] = [
 ];
 
 export const PAGE_3_QUICK_FOOD_ITEMS: AmenityItem[] = [
-  { name: "Maggi (₹20)", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 20, price: 20, badge: "₹20", description: "Classic 2-minute instant noodles pack" },
-  { name: "Eggs (₹10)", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 30, price: 10, badge: "₹10", description: "Fresh farm eggs (price per egg)" },
-  { name: "Coffee Sachet (₹5 per sachet)", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 50, price: 5, badge: "₹5 / sachet", description: "Instant rich coffee powder sachet" },
+  { name: "Maggi", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 20, price: 20, badge: "₹20 Per Pack", description: "Classic 2-minute instant noodles pack" },
+  { name: "Eggs", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 30, price: 10, badge: "₹10 Per Egg", description: "Fresh farm eggs (price per egg)" },
+  { name: "Coffee Sachet", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 50, price: 5, badge: "₹5 / sachet", description: "Instant rich coffee powder sachet" },
   { 
-    name: "Soft Drinks (₹50)", 
+    name: "Soft Drinks (300mL)", 
     isLimited: true, 
     category: "Item", 
     section: "fnb", 
     subSection: "food", 
     defaultLimit: 20, 
     price: 50, 
-    badge: "₹50", 
-    description: "Chilled soft drink bottle",
+    badge: "₹50 Per Can", 
+    description: "Chilled soft drink can",
     options: ["Coke", "Pepsi"]
   },
   { 
-    name: "Toned Milk 200/500 mL (₹30)", 
+    name: "Toned Milk", 
     isLimited: true, 
     category: "Item", 
     section: "fnb", 
     subSection: "food", 
     defaultLimit: 15, 
-    price: 30, 
-    badge: "₹30", 
+    price: 20, 
+    badge: "200mL: ₹20 • 500mL: ₹40", 
     description: "Fresh pasteurized toned milk pouch",
     options: ["200 mL", "500 mL"]
   },
-  { name: "Masala Box (₹50)", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 5, price: 50, badge: "₹50", description: "Essential cooking spices and seasoning box" }
+  { name: "Masala Box", isLimited: true, category: "Item", section: "fnb", subSection: "food", defaultLimit: 5, price: 50, badge: "₹50", description: "Essential cooking spices and seasoning box" }
 ];
 
 export const COMMON_ITEMS: AmenityItem[] = [
@@ -125,13 +125,19 @@ export const TARGET_AUTO_UNAVAILABLE_ITEMS = [
   "Set of Glasses",
   "Empty Water Bottle",
   "Cooking Oil Dispenser",
+  "Maggi",
+  "Eggs",
+  "Coffee Sachet",
+  "Soft Drinks (300mL)",
+  "Toned Milk",
+  "Masala Box",
+  // Backward compatibility:
   "Maggi (₹20)",
   "Eggs (₹10)",
   "Coffee Sachet (₹5 per sachet)",
   "Soft Drinks (₹50)",
   "Toned Milk 200/500 mL (₹30)",
   "Masala Box (₹50)",
-  // Backward compatibility:
   "Leg Massager (Paid)",
   "Glasses (Set of 2)",
   "USB 3.0 Cable + Adaptor",
@@ -151,6 +157,13 @@ export const DEFAULT_INVENTORY_LIMITS: Record<string, number> = {
   "Set of Glasses": 10,
   "Empty Water Bottle": 5,
   "Cooking Oil Dispenser": 5,
+  "Maggi": 20,
+  "Eggs": 30,
+  "Coffee Sachet": 50,
+  "Soft Drinks (300mL)": 20,
+  "Toned Milk": 15,
+  "Masala Box": 5,
+  // Backward compatibility:
   "Maggi (₹20)": 20,
   "Eggs (₹10)": 30,
   "Coffee Sachet (₹5 per sachet)": 50,
@@ -182,15 +195,22 @@ export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_servic
   "Set of Glasses": "available",
   "Empty Water Bottle": "available",
   "Cooking Oil Dispenser": "available",
+  "Maggi": "available",
+  "Eggs": "available",
+  "Coffee Sachet": "available",
+  "Soft Drinks (300mL)": "available",
+  "Soft Drinks - Coke": "available",
+  "Soft Drinks - Pepsi": "available",
+  "Toned Milk": "available",
+  "Toned Milk - 200 mL": "available",
+  "Toned Milk - 500 mL": "available",
+  "Masala Box": "available",
+  // Backward compatibility:
   "Maggi (₹20)": "available",
   "Eggs (₹10)": "available",
   "Coffee Sachet (₹5 per sachet)": "available",
   "Soft Drinks (₹50)": "available",
-  "Soft Drinks - Coke": "available",
-  "Soft Drinks - Pepsi": "available",
   "Toned Milk 200/500 mL (₹30)": "available",
-  "Toned Milk - 200 mL": "available",
-  "Toned Milk - 500 mL": "available",
   "Masala Box (₹50)": "available"
 };
 
@@ -306,12 +326,12 @@ export function normalizeReturnableName(rawName: string): string {
   if (lower.includes("massager")) return "Leg Massager (Paid)";
   if (lower.includes("usb") || lower.includes("cable") || lower.includes("adaptor")) return "USB 3.0 Cable + Adaptor";
   if (lower.includes("infrared") || lower.includes("therapy lamp") || lower.includes("heat therapy")) return "Infrared Heat Therapy Lamp (Paid)";
-  if (lower.includes("maggi")) return "Maggi (₹20)";
-  if (lower.includes("egg")) return "Eggs (₹10)";
-  if (lower.includes("coffee")) return "Coffee Sachet (₹5 per sachet)";
-  if (lower.includes("soft drink") || lower.includes("coke") || lower.includes("pepsi")) return "Soft Drinks (₹50)";
-  if (lower.includes("toned milk") || lower.includes("milk")) return "Toned Milk 200/500 mL (₹30)";
-  if (lower.includes("masala")) return "Masala Box (₹50)";
+  if (lower.includes("maggi")) return "Maggi";
+  if (lower.includes("egg")) return "Eggs";
+  if (lower.includes("coffee")) return "Coffee Sachet";
+  if (lower.includes("soft drink") || lower.includes("coke") || lower.includes("pepsi")) return "Soft Drinks (300mL)";
+  if (lower.includes("toned milk") || lower.includes("milk")) return "Toned Milk";
+  if (lower.includes("masala")) return "Masala Box";
   return base;
 }
 

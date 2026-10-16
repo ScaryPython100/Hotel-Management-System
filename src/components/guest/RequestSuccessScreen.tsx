@@ -25,6 +25,13 @@ export const ITEM_EMOJI_MAP: Record<string, string> = {
   "Set of Glasses": "🥛",
   "Empty Water Bottle": "🍶",
   "Cooking Oil Dispenser": "🫒",
+  "Maggi": "🍜",
+  "Eggs": "🥚",
+  "Coffee Sachet": "☕",
+  "Soft Drinks (300mL)": "🥤",
+  "Toned Milk": "🥛",
+  "Masala Box": "🧂",
+  // Backward compatibility:
   "Maggi (₹20)": "🍜",
   "Eggs (₹10)": "🥚",
   "Coffee Sachet (₹5 per sachet)": "☕",
