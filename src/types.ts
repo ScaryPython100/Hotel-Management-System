@@ -43,8 +43,7 @@ export const PAGE_1_DAILY_ITEMS: AmenityItem[] = [
     section: "daily",
     price: 500,
     badge: "₹500/-",
-    description: "Additional guest accommodation per night",
-    options: ["With Mattress", "Without Mattress"]
+    description: "Additional guest accommodation per night"
   },
   { name: "Shower Gel Refill", category: "Service", section: "daily", description: "Fresh luxury body wash replenish" },
   { name: "Shampoo Refill", category: "Service", section: "daily", description: "Hair shampoo dispenser refill" },
@@ -187,7 +186,11 @@ export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_servic
   "Eggs (₹10)": "available",
   "Coffee Sachet (₹5 per sachet)": "available",
   "Soft Drinks (₹50)": "available",
+  "Soft Drinks - Coke": "available",
+  "Soft Drinks - Pepsi": "available",
   "Toned Milk 200/500 mL (₹30)": "available",
+  "Toned Milk - 200 mL": "available",
+  "Toned Milk - 500 mL": "available",
   "Masala Box (₹50)": "available"
 };
 

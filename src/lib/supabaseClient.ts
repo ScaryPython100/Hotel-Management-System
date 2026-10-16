@@ -780,38 +780,15 @@ export async function syncInventoryAvailability(
     }
   }
 
-  // Evaluate availability strictly for the 8 target items
-  let hasChanged = false;
-  let autoDepletedChanged = false;
-  const updatedStatus = { ...currentStatus };
-
+  // Decouple staff manual availability toggles from in-use borrow counts.
+  // In-use counts drive the guest queue dynamically; staff availability switch remains 100% under staff manual control.
   for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
-    const borrowedCount = borrowedCounts.get(itemKey) || 0;
-    const pendingCount = pendingCounts.get(itemKey) || 0;
-
-    const inUse = borrowedCount + pendingCount;
-    const limit = limits[itemKey] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;
-
-    if (inUse >= limit) {
-      if (updatedStatus[itemKey] !== "out_of_service") {
-        updatedStatus[itemKey] = "out_of_service";
+    if (autoDepletedSet.has(itemKey)) {
+      autoDepletedSet.delete(itemKey);
+      autoDepletedChanged = true;
+      if (updatedStatus[itemKey] === "out_of_service") {
+        updatedStatus[itemKey] = "available";
         hasChanged = true;
-      }
-      if (!autoDepletedSet.has(itemKey)) {
-        autoDepletedSet.add(itemKey);
-        autoDepletedChanged = true;
-      }
-    } else {
-      // In stock (inUse < limit):
-      // ONLY restore to 'available' if the system previously auto-depleted it!
-      // If the owner manually chose 'out_of_service' in Settings, NEVER touch it!
-      if (autoDepletedSet.has(itemKey)) {
-        autoDepletedSet.delete(itemKey);
-        autoDepletedChanged = true;
-        if (updatedStatus[itemKey] !== "available") {
-          updatedStatus[itemKey] = "available";
-          hasChanged = true;
-        }
       }
     }
   }

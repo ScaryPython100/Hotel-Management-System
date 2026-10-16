@@ -474,7 +474,6 @@ export default function GuestView() {
   }, [inventory, amenitiesStatus]);
 
   const [activeTab, setActiveTab] = useState<AmenitySection>("daily");
-  const [showQrModal, setShowQrModal] = useState(false);
   const [copiedWifi, setCopiedWifi] = useState(false);
   const [copiedUpi, setCopiedUpi] = useState(false);
   const [showTermsModal, setShowTermsModal] = useState(false);
@@ -510,21 +509,19 @@ export default function GuestView() {
   };
 
   const handleQuickAction = (action: "checkout" | "late_checkout" | "extend") => {
-    if (action === "checkout") {
-      const msg = "Inform Checkout: Room ready for checkout inspection.";
-      setCustomMessage(prev => prev ? `${prev}\n${msg}` : msg);
-      toast.success("Added 'Inform Checkout' note.");
-    } else if (action === "late_checkout") {
-      const msg = "Request Late Checkout: Please inform availability and charges.";
-      setCustomMessage(prev => prev ? `${prev}\n${msg}` : msg);
-      toast.success("Added 'Request Late Checkout' note.");
-    } else if (action === "extend") {
-      const msg = "Request Stay Extension: Would like to extend stay.";
-      setCustomMessage(prev => prev ? `${prev}\n${msg}` : msg);
-      toast.success("Added 'Request Stay Extension' note.");
-    }
-    const el = document.getElementById("other-requests-section");
-    if (el) el.scrollIntoView({ behavior: "smooth" });
+    let itemName = "Inform Checkout";
+    if (action === "late_checkout") itemName = "Request Late Checkout";
+    if (action === "extend") itemName = "Request Stay Extension";
+
+    setSelectedItems(prev => {
+      if (prev.includes(itemName)) {
+        toast(`Removed "${itemName}" from your request.`, { icon: "↩️" });
+        return prev.filter(i => i !== itemName);
+      } else {
+        toast.success(`Selected "${itemName}"`);
+        return [...prev, itemName];
+      }
+    });
   };
 
   const tab1Count = React.useMemo(() => {
@@ -920,95 +917,71 @@ export default function GuestView() {
             </div>
           </div>
 
-          {/* UPI PAYMENT QR CARD */}
-          <div className="bg-white border border-[#E5E1DB] p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
-            <div className="flex items-center gap-4 w-full sm:w-auto">
-              {/* QR Image Thumbnail */}
-              <div
-                onClick={() => setShowQrModal(true)}
-                className="relative group cursor-pointer shrink-0 border border-[#E5E1DB] p-1 bg-white hover:border-[#A68966] transition-colors"
-                title="Tap to enlarge QR code"
-              >
-                <img
-                  src={upiQrImage}
-                  alt="Hues Stay UPI QR Code"
-                  className="w-16 h-16 sm:w-20 sm:h-20 object-contain"
-                />
-                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
-                  <Maximize2 className="w-4 h-4" />
-                </div>
-              </div>
-
-              <div>
-                <div className="flex items-center gap-2 mb-0.5">
-                  <QrCode className="w-4 h-4 text-[#A68966]" />
-                  <h3 className="font-serif text-base sm:text-lg font-medium text-[#2D2926]">
-                    Hues Stay UPI Payment
-                  </h3>
-                </div>
-                <p className="text-xs text-[#8C857D] mb-1">
-                  Scan to pay deposit, room charges, or groceries via any UPI app.
-                </p>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-mono text-xs font-semibold bg-[#FAF8F5] border border-[#E5E1DB] px-2 py-0.5 text-[#2D2926] select-all">
-                    huesstay@okicici
-                  </span>
-                  <span className="text-[10px] text-[#8C857D]">
-                    GPay • PhonePe • Paytm • BHIM
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 w-full sm:w-auto justify-end shrink-0">
-              <button
-                type="button"
-                onClick={() => setShowQrModal(true)}
-                className="px-3.5 py-2 border border-[#2D2926] bg-[#2D2926] text-white hover:bg-neutral-800 text-xs font-semibold uppercase tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-                Scan QR
-              </button>
-              <button
-                type="button"
-                onClick={handleCopyUpi}
-                className="px-3.5 py-2 border border-[#E5E1DB] bg-[#FAF8F5] hover:bg-[#F2EFE9] text-[#2D2926] text-xs font-semibold uppercase tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer"
-              >
-                {copiedUpi ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5 text-[#A68966]" />}
-                {copiedUpi ? "Copied" : "Copy UPI"}
-              </button>
+          {/* PAYMENT QR CODE */}
+          <div className="bg-white border border-[#E5E1DB] p-6 text-center shadow-xs">
+            <h3 className="font-serif text-xl sm:text-2xl font-medium text-[#2D2926] mb-4">
+              Payment QR Code
+            </h3>
+            <div className="flex justify-center items-center">
+              <img
+                src={upiQrImage}
+                alt="Payment QR Code"
+                className="w-56 h-56 sm:w-64 sm:h-64 object-contain border border-[#E5E1DB] p-2 bg-white shadow-2xs"
+              />
             </div>
           </div>
 
-          {/* Quick Action Buttons */}
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-[#8C857D] w-full sm:w-auto mb-1 sm:mb-0">
+          {/* QUICK ACTION BUTTONS */}
+          <div className="space-y-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-[#8C857D] block">
               Quick Actions:
             </span>
-            <button
-              type="button"
-              onClick={() => handleQuickAction("checkout")}
-              className="flex-1 sm:flex-none px-3.5 py-2 border border-[#E5E1DB] bg-white hover:bg-[#FAF8F5] text-xs font-medium text-[#2D2926] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
-            >
-              <LogOut className="w-3.5 h-3.5 text-[#A68966]" />
-              Inform Checkout
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickAction("late_checkout")}
-              className="flex-1 sm:flex-none px-3.5 py-2 border border-[#E5E1DB] bg-white hover:bg-[#FAF8F5] text-xs font-medium text-[#2D2926] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
-            >
-              <Clock className="w-3.5 h-3.5 text-[#A68966]" />
-              Request Late Checkout
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickAction("extend")}
-              className="flex-1 sm:flex-none px-3.5 py-2 border border-[#E5E1DB] bg-white hover:bg-[#FAF8F5] text-xs font-medium text-[#2D2926] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
-            >
-              <Calendar className="w-3.5 h-3.5 text-[#A68966]" />
-              Request Stay Extension
-            </button>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <button
+                type="button"
+                onClick={() => handleQuickAction("checkout")}
+                className={cn(
+                  "py-3.5 px-4 border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs select-none",
+                  selectedItems.includes("Inform Checkout")
+                    ? "bg-[#2D2926] text-white border-[#2D2926]"
+                    : "bg-white hover:bg-[#FAF8F5] text-[#2D2926] border-[#E5E1DB]"
+                )}
+              >
+                <LogOut className={cn("w-4 h-4", selectedItems.includes("Inform Checkout") ? "text-white" : "text-[#A68966]")} />
+                <span>Inform Checkout</span>
+                {selectedItems.includes("Inform Checkout") && <Check className="w-3.5 h-3.5 text-white ml-auto" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleQuickAction("late_checkout")}
+                className={cn(
+                  "py-3.5 px-4 border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs select-none",
+                  selectedItems.includes("Request Late Checkout")
+                    ? "bg-[#2D2926] text-white border-[#2D2926]"
+                    : "bg-white hover:bg-[#FAF8F5] text-[#2D2926] border-[#E5E1DB]"
+                )}
+              >
+                <Clock className={cn("w-4 h-4", selectedItems.includes("Request Late Checkout") ? "text-white" : "text-[#A68966]")} />
+                <span>Request Late Checkout</span>
+                {selectedItems.includes("Request Late Checkout") && <Check className="w-3.5 h-3.5 text-white ml-auto" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleQuickAction("extend")}
+                className={cn(
+                  "py-3.5 px-4 border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs select-none",
+                  selectedItems.includes("Request Stay Extension")
+                    ? "bg-[#2D2926] text-white border-[#2D2926]"
+                    : "bg-white hover:bg-[#FAF8F5] text-[#2D2926] border-[#E5E1DB]"
+                )}
+              >
+                <Calendar className={cn("w-4 h-4", selectedItems.includes("Request Stay Extension") ? "text-white" : "text-[#A68966]")} />
+                <span>Request Stay Extension</span>
+                {selectedItems.includes("Request Stay Extension") && <Check className="w-3.5 h-3.5 text-white ml-auto" />}
+              </button>
+            </div>
           </div>
         </section>
 
@@ -1139,67 +1112,6 @@ export default function GuestView() {
           </p>
         </footer>
       </main>
-
-      {/* FULL-SIZE PAYMENT QR LIGHTBOX MODAL */}
-      {showQrModal && (
-        <div
-          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
-          onClick={() => setShowQrModal(false)}
-        >
-          <div
-            className="bg-white max-w-sm w-full p-6 text-center shadow-2xl relative border border-[#E5E1DB]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              onClick={() => setShowQrModal(false)}
-              className="absolute top-4 right-4 p-1.5 text-[#8C857D] hover:text-[#2D2926] cursor-pointer"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[#A68966] mb-1">
-              Google Pay • PhonePe • Paytm
-            </div>
-            <h3 className="font-serif text-2xl font-bold text-[#2D2926] mb-4">
-              Hues Stay Payment QR
-            </h3>
-
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 mb-4 flex justify-center">
-              <img
-                src={upiQrImage}
-                alt="Hues Stay Google Pay QR Code"
-                className="w-64 h-auto object-contain max-h-72"
-              />
-            </div>
-
-            <div className="mb-4">
-              <span className="text-xs text-[#8C857D] block mb-1">Official UPI ID:</span>
-              <div className="font-mono font-bold text-sm bg-[#FAF8F5] border border-[#E5E1DB] py-2 px-3 text-[#2D2926] select-all">
-                huesstay@okicici
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={handleCopyUpi}
-                className="flex-1 py-3 bg-[#A68966] text-white text-xs font-semibold uppercase tracking-wider hover:bg-[#8E7455] transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                {copiedUpi ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                {copiedUpi ? "UPI ID Copied!" : "Copy UPI ID"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowQrModal(false)}
-                className="px-5 py-3 border border-[#E5E1DB] text-[#2D2926] text-xs font-semibold uppercase tracking-wider hover:bg-neutral-100 transition-colors cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* TERMS & CONDITIONS / HOUSE RULES MODAL */}
       {showTermsModal && (

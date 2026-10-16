@@ -142,31 +142,12 @@ async function reconcileServerlessInventory(supabaseUrl: string, supabaseKey: st
 
     let hasChanged = false;
     for (const item of TARGET_AUTO_ITEMS) {
-      const borCount = borCounts.get(item) || 0;
-      const pendCount = pendCounts.get(item) || 0;
-
-      const inUse = borCount + pendCount;
-      const limit = limits[item] ?? DEFAULT_LIMITS[item] ?? 1;
-
-      if (inUse >= limit) {
-        if (amenityStatus[item] !== "out_of_service") {
-          amenityStatus[item] = "out_of_service";
+      if (autoDepletedSet.has(item)) {
+        autoDepletedSet.delete(item);
+        autoDepletedChanged = true;
+        if (amenityStatus[item] === "out_of_service") {
+          amenityStatus[item] = "available";
           hasChanged = true;
-        }
-        if (!autoDepletedSet.has(item)) {
-          autoDepletedSet.add(item);
-          autoDepletedChanged = true;
-        }
-      } else {
-        // ONLY restore to 'available' if the item was automatically depleted by inventory!
-        // Never override manual owner settings!
-        if (autoDepletedSet.has(item)) {
-          autoDepletedSet.delete(item);
-          autoDepletedChanged = true;
-          if (amenityStatus[item] !== "available") {
-            amenityStatus[item] = "available";
-            hasChanged = true;
-          }
         }
       }
     }

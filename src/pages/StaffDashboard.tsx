@@ -610,18 +610,17 @@ export default function StaffDashboard() {
                       Needs Attention ({pendingRequests.length})
                     </h3>
 
-                    {Object.keys(pendingByRoom).length === 0 ? (
+                    {pendingRequests.length === 0 ? (
                       <div className="bg-white border border-dashed border-[#E5E1DB] p-12 text-center">
                         <CheckCircle2 className="w-10 h-10 text-[#E5E1DB] mx-auto mb-4" />
                         <p className="text-sm italic text-[#8C857D]">No pending requests right now. Great job!</p>
                       </div>
                     ) : (
                       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-                        {Object.entries(pendingByRoom).map(([roomId, roomReqs]) => (
+                        {pendingRequests.map((req) => (
                           <RoomGroupCard
-                            key={`pending-${roomId}`}
-                            roomId={roomId}
-                            requests={roomReqs}
+                            key={`pending-${req.id}`}
+                            request={req}
                             onComplete={handleMarkCompleted}
                             onDelete={handleDelete}
                             isPending={true}
@@ -631,7 +630,7 @@ export default function StaffDashboard() {
                     )}
                   </section>
 
-                  {Object.keys(completedByRoom).length > 0 && (
+                  {completedRequests.length > 0 && (
                     <section>
                       <div className="flex items-center justify-between mb-6">
                         <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#8C857D] flex items-center">
@@ -648,11 +647,10 @@ export default function StaffDashboard() {
                         </button>
                       </div>
                       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 opacity-70">
-                        {Object.entries(completedByRoom).slice(0, 9).map(([roomId, roomReqs]) => (
+                        {completedRequests.slice(0, 12).map((req) => (
                           <RoomGroupCard
-                            key={`completed-${roomId}`}
-                            roomId={roomId}
-                            requests={roomReqs}
+                            key={`completed-${req.id}`}
+                            request={req}
                             onComplete={handleMarkCompleted}
                             onDelete={handleDelete}
                             isPending={false}

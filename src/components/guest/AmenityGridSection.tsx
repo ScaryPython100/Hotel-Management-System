@@ -42,8 +42,6 @@ export default function AmenityGridSection({
 }: AmenityGridSectionProps) {
   const deletedSet = new Set(deletedItems);
 
-  // Local state for options & quantities so guest can customize before or while selecting
-  const [extraPersonOption, setExtraPersonOption] = useState<"With Mattress" | "Without Mattress">("With Mattress");
   const [softDrinkOption, setSoftDrinkOption] = useState<"Coke" | "Pepsi">("Coke");
   const [tonedMilkOption, setTonedMilkOption] = useState<"200 mL" | "500 mL">("200 mL");
 
@@ -82,13 +80,19 @@ export default function AmenityGridSection({
 
   const formatItemSelectionString = (baseName: string, qty: number): string => {
     if (baseName.includes("Extra Person")) {
-      return `Extra Person (${extraPersonOption}) (₹500/-)`;
+      return "Extra Person (w/ or w/o Mattress) (₹500/-)";
     }
     if (baseName.includes("Soft Drinks")) {
-      return qty > 1 ? `Soft Drinks (${softDrinkOption}) (₹50) (qty: ${qty})` : `Soft Drinks (${softDrinkOption}) (₹50)`;
+      const isCokeOut = amenitiesStatus["Soft Drinks - Coke"] === "out_of_service";
+      const isPepsiOut = amenitiesStatus["Soft Drinks - Pepsi"] === "out_of_service";
+      const flavor = isCokeOut && !isPepsiOut ? "Pepsi" : (isPepsiOut && !isCokeOut ? "Coke" : softDrinkOption);
+      return qty > 1 ? `Soft Drinks (${flavor}) (₹50) (qty: ${qty})` : `Soft Drinks (${flavor}) (₹50)`;
     }
     if (baseName.includes("Toned Milk")) {
-      return qty > 1 ? `Toned Milk (${tonedMilkOption}) (₹30) (qty: ${qty})` : `Toned Milk (${tonedMilkOption}) (₹30)`;
+      const is200Out = amenitiesStatus["Toned Milk - 200 mL"] === "out_of_service";
+      const is500Out = amenitiesStatus["Toned Milk - 500 mL"] === "out_of_service";
+      const size = is200Out && !is500Out ? "500 mL" : (is500Out && !is200Out ? "200 mL" : tonedMilkOption);
+      return qty > 1 ? `Toned Milk (${size}) (₹30) (qty: ${qty})` : `Toned Milk (${size}) (₹30)`;
     }
     if (qty > 1) {
       return `${baseName} (qty: ${qty})`;
@@ -147,20 +151,8 @@ export default function AmenityGridSection({
   // 1. PAGE 1: DAILY SERVICES
   const page1Items = PAGE_1_DAILY_ITEMS.filter(i => !deletedSet.has(i.name));
 
-  // 2. PAGE 2: RETURNABLE ITEMS
-  const page2Items = [
-    ...PAGE_2_RETURNABLE_ITEMS.filter(i => !deletedSet.has(i.name)),
-    // Include any custom dynamically added items that belong to returnable
-    ...Object.keys(inventory)
-      .filter(k => !deletedSet.has(k) && isReturnableItem(k) && !PAGE_2_RETURNABLE_ITEMS.some(p => p.name === k) && !PAGE_3_FNB_DEPOSIT_ITEMS.some(p => p.name === k))
-      .map(k => ({
-        name: k,
-        isLimited: true,
-        category: "Item" as const,
-        section: "returnable" as const,
-        description: "Durable appliance / returnable item"
-      }))
-  ];
+  // 2. PAGE 2: RETURNABLE ITEMS (Strictly the 5 shared appliances)
+  const page2Items = PAGE_2_RETURNABLE_ITEMS.filter(i => !deletedSet.has(i.name));
 
   // 3. PAGE 3: F&B ITEMS
   const fnbDepositItems = PAGE_3_FNB_DEPOSIT_ITEMS.filter(i => !deletedSet.has(i.name));
@@ -224,55 +216,6 @@ export default function AmenityGridSection({
                     </div>
                   </div>
 
-                  {/* Options selector for Extra Person (With vs Without Mattress) */}
-                  {isExtraPerson && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      className="mt-2 pt-2 border-t border-[#E5E1DB]/60 flex items-center gap-2"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setExtraPersonOption("With Mattress");
-                          if (selected) {
-                            onUpdateItemString(
-                              selectedItems.find(s => s.toLowerCase().includes("extra person")) || "",
-                              "Extra Person (With Mattress) (₹500/-)"
-                            );
-                          }
-                        }}
-                        className={cn(
-                          "px-2.5 py-1 text-[11px] font-medium border transition-colors",
-                          extraPersonOption === "With Mattress"
-                            ? "bg-[#2D2926] text-white border-[#2D2926]"
-                            : "bg-white text-[#8C857D] border-[#E5E1DB] hover:text-[#2D2926]"
-                        )}
-                      >
-                        With Mattress
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setExtraPersonOption("Without Mattress");
-                          if (selected) {
-                            onUpdateItemString(
-                              selectedItems.find(s => s.toLowerCase().includes("extra person")) || "",
-                              "Extra Person (Without Mattress) (₹500/-)"
-                            );
-                          }
-                        }}
-                        className={cn(
-                          "px-2.5 py-1 text-[11px] font-medium border transition-colors",
-                          extraPersonOption === "Without Mattress"
-                            ? "bg-[#2D2926] text-white border-[#2D2926]"
-                            : "bg-white text-[#8C857D] border-[#E5E1DB] hover:text-[#2D2926]"
-                        )}
-                      >
-                        Without Mattress
-                      </button>
-                    </div>
-                  )}
-
                   <div className="flex items-center gap-2 flex-wrap">
                     {itemObj.badge && (
                       <span className="text-[10px] font-semibold text-[#A68966] bg-[#FAF8F5] border border-[#E5E1DB] px-2 py-0.5">
@@ -301,13 +244,6 @@ export default function AmenityGridSection({
             </h2>
             <p className="text-xs text-[#8C857D]">
               Items that are to be returned when finished so fellow guests can use them.
-            </p>
-          </div>
-
-          <div className="bg-amber-50/70 border border-amber-200/80 p-4 text-[#8C857D] flex items-start gap-3 text-xs leading-relaxed">
-            <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <p className="text-amber-900">
-              <strong>Smart Return Policy:</strong> Appliances are shared amenities for temporary in-room use. If an appliance is currently in use by another room, you can tap to reserve next in line — housekeeping will relay it straight to your room as soon as it is returned.
             </p>
           </div>
 
@@ -384,19 +320,15 @@ export default function AmenityGridSection({
                         <Clock className="w-3 h-3 text-amber-700" />
                         <span>
                           {selected
-                            ? `Waitlist Reserved (${queueDepth > 0 ? `#${queueDepth + 1} in queue` : "Next in line"})`
-                            : `In Use Right Now • Tap to Reserve (Queue #${queueDepth + 1})`}
+                            ? (queueDepth === 0 ? "Next in Queue" : `No. ${queueDepth + 1} in Queue`)
+                            : `Item is in Use • ${queueDepth === 0 ? "Next in Queue" : `No. ${queueDepth + 1} in Queue`}`}
                         </span>
                       </span>
                     ) : isDisabled ? (
                       <span className="text-[10px] text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 uppercase tracking-wider font-semibold rounded-sm inline-block w-fit">
                         Unavailable
                       </span>
-                    ) : (
-                      <span className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 font-medium rounded-sm inline-block w-fit">
-                        Available for temporary use
-                      </span>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               );
@@ -536,12 +468,24 @@ export default function AmenityGridSection({
               {fnbQuickFoodItems.map((itemObj) => {
                 const item = itemObj.name;
                 const selected = isSelected(item);
-                const isOutOfService = checkIsItemOutOfService(item);
+                const isSoftDrink = item.includes("Soft Drinks");
+                const isTonedMilk = item.includes("Toned Milk");
+
+                const isCokeOut = isSoftDrink && amenitiesStatus["Soft Drinks - Coke"] === "out_of_service";
+                const isPepsiOut = isSoftDrink && amenitiesStatus["Soft Drinks - Pepsi"] === "out_of_service";
+                const isAllSoftDrinksOut = isSoftDrink && isCokeOut && isPepsiOut;
+
+                const is200Out = isTonedMilk && amenitiesStatus["Toned Milk - 200 mL"] === "out_of_service";
+                const is500Out = isTonedMilk && amenitiesStatus["Toned Milk - 500 mL"] === "out_of_service";
+                const isAllMilkOut = isTonedMilk && is200Out && is500Out;
+
+                const isOutOfService = checkIsItemOutOfService(item) || isAllSoftDrinksOut || isAllMilkOut;
                 const isDisabled = isOutOfService;
                 const qty = getQty(item);
                 const emoji = ITEM_EMOJI_MAP[item] || "🍜";
-                const isSoftDrink = item.includes("Soft Drinks");
-                const isTonedMilk = item.includes("Toned Milk");
+
+                const activeSoftDrinkFlavor = isCokeOut && !isPepsiOut ? "Pepsi" : (isPepsiOut && !isCokeOut ? "Coke" : softDrinkOption);
+                const activeTonedMilkSize = is200Out && !is500Out ? "500 mL" : (is500Out && !is200Out ? "200 mL" : tonedMilkOption);
 
                 return (
                   <div
@@ -588,7 +532,9 @@ export default function AmenityGridSection({
                         <div className="flex border border-[#E5E1DB] bg-white p-0.5">
                           <button
                             type="button"
+                            disabled={isCokeOut}
                             onClick={() => {
+                              if (isCokeOut) return;
                               setSoftDrinkOption("Coke");
                               if (selected) {
                                 onUpdateItemString(
@@ -599,14 +545,20 @@ export default function AmenityGridSection({
                             }}
                             className={cn(
                               "px-2 py-0.5 text-[11px] font-semibold transition-colors",
-                              softDrinkOption === "Coke" ? "bg-[#2D2926] text-white" : "text-[#8C857D] hover:text-[#2D2926]"
+                              isCokeOut
+                                ? "opacity-40 cursor-not-allowed line-through text-gray-400"
+                                : activeSoftDrinkFlavor === "Coke"
+                                ? "bg-[#2D2926] text-white"
+                                : "text-[#8C857D] hover:text-[#2D2926]"
                             )}
                           >
-                            Coke
+                            Coke {isCokeOut ? "(Out)" : ""}
                           </button>
                           <button
                             type="button"
+                            disabled={isPepsiOut}
                             onClick={() => {
+                              if (isPepsiOut) return;
                               setSoftDrinkOption("Pepsi");
                               if (selected) {
                                 onUpdateItemString(
@@ -617,10 +569,14 @@ export default function AmenityGridSection({
                             }}
                             className={cn(
                               "px-2 py-0.5 text-[11px] font-semibold transition-colors",
-                              softDrinkOption === "Pepsi" ? "bg-[#2D2926] text-white" : "text-[#8C857D] hover:text-[#2D2926]"
+                              isPepsiOut
+                                ? "opacity-40 cursor-not-allowed line-through text-gray-400"
+                                : activeSoftDrinkFlavor === "Pepsi"
+                                ? "bg-[#2D2926] text-white"
+                                : "text-[#8C857D] hover:text-[#2D2926]"
                             )}
                           >
-                            Pepsi
+                            Pepsi {isPepsiOut ? "(Out)" : ""}
                           </button>
                         </div>
                       </div>
@@ -636,7 +592,9 @@ export default function AmenityGridSection({
                         <div className="flex border border-[#E5E1DB] bg-white p-0.5">
                           <button
                             type="button"
+                            disabled={is200Out}
                             onClick={() => {
+                              if (is200Out) return;
                               setTonedMilkOption("200 mL");
                               if (selected) {
                                 onUpdateItemString(
@@ -647,14 +605,20 @@ export default function AmenityGridSection({
                             }}
                             className={cn(
                               "px-2 py-0.5 text-[11px] font-semibold transition-colors",
-                              tonedMilkOption === "200 mL" ? "bg-[#2D2926] text-white" : "text-[#8C857D] hover:text-[#2D2926]"
+                              is200Out
+                                ? "opacity-40 cursor-not-allowed line-through text-gray-400"
+                                : activeTonedMilkSize === "200 mL"
+                                ? "bg-[#2D2926] text-white"
+                                : "text-[#8C857D] hover:text-[#2D2926]"
                             )}
                           >
-                            200 mL
+                            200 mL {is200Out ? "(Out)" : ""}
                           </button>
                           <button
                             type="button"
+                            disabled={is500Out}
                             onClick={() => {
+                              if (is500Out) return;
                               setTonedMilkOption("500 mL");
                               if (selected) {
                                 onUpdateItemString(
@@ -665,10 +629,14 @@ export default function AmenityGridSection({
                             }}
                             className={cn(
                               "px-2 py-0.5 text-[11px] font-semibold transition-colors",
-                              tonedMilkOption === "500 mL" ? "bg-[#2D2926] text-white" : "text-[#8C857D] hover:text-[#2D2926]"
+                              is500Out
+                                ? "opacity-40 cursor-not-allowed line-through text-gray-400"
+                                : activeTonedMilkSize === "500 mL"
+                                ? "bg-[#2D2926] text-white"
+                                : "text-[#8C857D] hover:text-[#2D2926]"
                             )}
                           >
-                            500 mL
+                            500 mL {is500Out ? "(Out)" : ""}
                           </button>
                         </div>
                       </div>

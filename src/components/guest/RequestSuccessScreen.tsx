@@ -69,11 +69,11 @@ export default function RequestSuccessScreen({
       </div>
 
       <h2 className="text-3xl font-serif italic mb-2">
-        {isWaitlist ? "Reserved! You are in line" : "Request Received"}
+        {isWaitlist ? "Reserved! Item is in Use" : "Request Received"}
       </h2>
       <p className="text-[#8C857D] mb-6 max-w-md text-sm">
         {isWaitlist
-          ? `Reserved! You are #${queuePosition} in line for the ${waitlistForItem || selectedItems[0] || "item"}. Housekeeping will bring it straight to Room ${roomNumber} as soon as it frees up.`
+          ? `Item is in Use • ${queuePosition === 1 ? "Next in Queue" : `No. ${queuePosition} in Queue`}. Housekeeping will bring the ${waitlistForItem || selectedItems[0] || "item"} straight to Room ${roomNumber} as soon as it is returned.`
           : `Our housekeeping and guest service team has been notified and will attend to Room ${roomNumber} promptly.`}
       </p>
 
@@ -81,10 +81,10 @@ export default function RequestSuccessScreen({
         <div className="bg-amber-50/80 border border-amber-200/90 p-4 mb-6 max-w-sm w-full text-left">
           <p className="text-xs font-bold text-amber-900 flex items-center gap-1.5 mb-1">
             <Clock className="w-3.5 h-3.5 text-amber-700" />
-            Floor-to-Floor Smart Relay
+            Queue Status: {queuePosition === 1 ? "Next in Queue" : `No. ${queuePosition} in Queue`}
           </p>
           <p className="text-[11px] text-amber-800 leading-relaxed">
-            The {waitlistForItem || "appliance"} is currently in use. When the other guest finishes, housekeeping is notified to hand it over directly to Room {roomNumber}.
+            The {waitlistForItem || "item"} is currently in use. When it is returned, housekeeping will bring it straight to Room {roomNumber}.
           </p>
         </div>
       )}
@@ -105,7 +105,7 @@ export default function RequestSuccessScreen({
                     {item}
                   </span>
                   <span className={`font-mono text-xs ${isWaitlist ? "text-amber-700 bg-amber-50 border-amber-200" : "text-[#A68966] bg-[#FAF8F5] border-[#EBE7E1]"} px-2 py-0.5 border rounded-xs`}>
-                    {isWaitlist ? `Queue #${queuePosition}` : "Requested"}
+                    {isWaitlist ? (queuePosition === 1 ? "Next in Queue" : `No. ${queuePosition} in Queue`) : "Requested"}
                   </span>
                 </li>
               );

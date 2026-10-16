@@ -40,6 +40,7 @@ import {
 import { toast, Toaster } from "sonner";
 import { useOutletContext } from "react-router-dom";
 import { ITEM_EMOJI_MAP } from "../components/guest/RequestSuccessScreen";
+import { cn } from "../lib/utils";
 
 function isCorruptOrDuplicateItem(name: string): boolean {
   if (!name) return true;
@@ -927,66 +928,148 @@ export default function StaffSettings() {
                 const inv = inventoryMap[item.name] || { limit: item.defaultLimit || 20, inUse: 0 };
                 const total = inv.limit || 20;
                 const emoji = ITEM_EMOJI_MAP[item.name] || "🍜";
+                const isSoftDrinks = item.name.includes("Soft Drinks");
+                const isTonedMilk = item.name.includes("Toned Milk");
 
                 return (
                   <div
                     key={item.name}
-                    className={`p-3.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                    className={`p-3.5 border flex flex-col justify-between gap-3 transition-colors ${
                       isAvailable ? "bg-[#FAF8F5] border-[#E5E1DB]" : "bg-red-50/70 border-red-200"
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      <span className="text-xl">{emoji}</span>
-                      <div>
-                        <span className="font-medium text-sm text-[#2D2926] block">{item.name}</span>
-                        {item.badge && (
-                          <span className="text-[10px] text-[#A68966] font-semibold mt-0.5 block">
-                            Price: {item.badge}
-                          </span>
-                        )}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="text-xl">{emoji}</span>
+                        <div>
+                          <span className="font-medium text-sm text-[#2D2926] block">{item.name}</span>
+                          {item.badge && (
+                            <span className="text-[10px] text-[#A68966] font-semibold mt-0.5 block">
+                              Price: {item.badge}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2.5">
+                        <div className="flex items-center gap-1 bg-white border border-[#E5E1DB] px-1.5 py-0.5">
+                          <span className="text-xs text-[#8C857D] mr-1">Stock:</span>
+                          <button
+                            type="button"
+                            onClick={() => handleLimitChange(item.name, Math.max(0, total - 1))}
+                            className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                          >
+                            <Minus className="w-2.5 h-2.5" />
+                          </button>
+                          <span className="w-8 text-center font-mono font-bold text-xs">{total}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleLimitChange(item.name, total + 1)}
+                            className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                          >
+                            <Plus className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => toggleStatus(item.name)}
+                          className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border shrink-0 transition-colors cursor-pointer ${
+                            isAvailable
+                              ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                              : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                          }`}
+                        >
+                          {isAvailable ? "Available" : "Unavailable"}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteItem(item.name)}
+                          className="p-1.5 text-red-600 hover:text-red-800 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2.5">
-                      <div className="flex items-center gap-1 bg-white border border-[#E5E1DB] px-1.5 py-0.5">
-                        <span className="text-xs text-[#8C857D] mr-1">Stock:</span>
-                        <button
-                          type="button"
-                          onClick={() => handleLimitChange(item.name, Math.max(0, total - 1))}
-                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
-                        >
-                          <Minus className="w-2.5 h-2.5" />
-                        </button>
-                        <span className="w-8 text-center font-mono font-bold text-xs">{total}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleLimitChange(item.name, total + 1)}
-                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
-                        >
-                          <Plus className="w-2.5 h-2.5" />
-                        </button>
+                    {/* Sub-item flavor availability for Soft Drinks */}
+                    {isSoftDrinks && (
+                      <div className="pt-2.5 border-t border-[#E5E1DB]/80 flex flex-wrap items-center gap-3 text-xs bg-white/70 p-2">
+                        <span className="text-[10px] uppercase font-bold text-[#8C857D] tracking-wider">
+                          Flavor Stock Options:
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-xs text-[#2D2926]">Coke:</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleStatus("Soft Drinks - Coke")}
+                            className={cn(
+                              "px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border rounded-xs transition-colors cursor-pointer",
+                              amenityStatus["Soft Drinks - Coke"] !== "out_of_service"
+                                ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                                : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                            )}
+                          >
+                            {amenityStatus["Soft Drinks - Coke"] !== "out_of_service" ? "In Stock" : "Out of Stock"}
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-xs text-[#2D2926]">Pepsi:</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleStatus("Soft Drinks - Pepsi")}
+                            className={cn(
+                              "px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border rounded-xs transition-colors cursor-pointer",
+                              amenityStatus["Soft Drinks - Pepsi"] !== "out_of_service"
+                                ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                                : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                            )}
+                          >
+                            {amenityStatus["Soft Drinks - Pepsi"] !== "out_of_service" ? "In Stock" : "Out of Stock"}
+                          </button>
+                        </div>
                       </div>
+                    )}
 
-                      <button
-                        type="button"
-                        onClick={() => toggleStatus(item.name)}
-                        className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border shrink-0 transition-colors cursor-pointer ${
-                          isAvailable
-                            ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
-                            : "bg-red-600 text-white border-red-700 hover:bg-red-700"
-                        }`}
-                      >
-                        {isAvailable ? "Available" : "Unavailable"}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteItem(item.name)}
-                        className="p-1.5 text-red-600 hover:text-red-800 cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    {/* Sub-item size availability for Toned Milk */}
+                    {isTonedMilk && (
+                      <div className="pt-2.5 border-t border-[#E5E1DB]/80 flex flex-wrap items-center gap-3 text-xs bg-white/70 p-2">
+                        <span className="text-[10px] uppercase font-bold text-[#8C857D] tracking-wider">
+                          Size Stock Options:
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-xs text-[#2D2926]">200 mL:</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleStatus("Toned Milk - 200 mL")}
+                            className={cn(
+                              "px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border rounded-xs transition-colors cursor-pointer",
+                              amenityStatus["Toned Milk - 200 mL"] !== "out_of_service"
+                                ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                                : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                            )}
+                          >
+                            {amenityStatus["Toned Milk - 200 mL"] !== "out_of_service" ? "In Stock" : "Out of Stock"}
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-xs text-[#2D2926]">500 mL:</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleStatus("Toned Milk - 500 mL")}
+                            className={cn(
+                              "px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border rounded-xs transition-colors cursor-pointer",
+                              amenityStatus["Toned Milk - 500 mL"] !== "out_of_service"
+                                ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                                : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                            )}
+                          >
+                            {amenityStatus["Toned Milk - 500 mL"] !== "out_of_service" ? "In Stock" : "Out of Stock"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
