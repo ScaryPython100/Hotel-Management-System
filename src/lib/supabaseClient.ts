@@ -782,6 +782,10 @@ export async function syncInventoryAvailability(
 
   // Decouple staff manual availability toggles from in-use borrow counts.
   // In-use counts drive the guest queue dynamically; staff availability switch remains 100% under staff manual control.
+  let hasChanged = false;
+  let autoDepletedChanged = false;
+  const updatedStatus = { ...currentStatus };
+
   for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
     if (autoDepletedSet.has(itemKey)) {
       autoDepletedSet.delete(itemKey);

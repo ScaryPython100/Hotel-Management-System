@@ -15,7 +15,6 @@ import {
   saveBorrowedToSupabase,
   markBorrowedReturnedInSupabase,
   relayBorrowedItemInSupabase,
-  updateRequestStatusInSupabase,
   fetchBorrowedFromSupabase,
   deleteBorrowedFromSupabase,
   SUPABASE_TABLE_SQL,

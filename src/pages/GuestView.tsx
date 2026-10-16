@@ -2,14 +2,14 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { collection, setDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { 
-  getClientSupabase, 
+import { getClientSupabase, 
   fetchLiveAmenitiesStatus, 
   fetchLiveBorrowed, 
   fetchLiveRequests, 
   fetchLiveInventoryLimits,
   fetchLiveDeletedItems
 } from "../lib/supabaseClient";
+import { cn } from "../lib/utils";
 import { 
   COMMON_ITEMS, 
   DEFAULT_ROOMS, 
@@ -688,7 +688,7 @@ export default function GuestView() {
               custom_message: formattedMessage,
               status: "pending",
               created_at: requestData.createdAt
-            }, { onConflict: "id" }).catch(() => {});
+            }, { onConflict: "id" }).then(() => {}, () => {});
           }
         });
       }
