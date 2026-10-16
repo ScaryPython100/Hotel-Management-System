@@ -299,6 +299,7 @@ export function normalizeReturnableName(rawName: string): string {
   if (lower.includes("hot pack") || lower.includes("pack")) return "Hot Pack";
   if (lower.includes("plate")) return "Set of Plates";
   if (lower.includes("cup") || lower.includes("bowl")) return "Set of Cups/Bowls";
+  if (lower.includes("glasses (set of 2)") || lower.includes("water glasses") || lower.includes("set of 2")) return "Glasses (Set of 2)";
   if (lower.includes("glass")) return "Set of Glasses";
   if (lower.includes("empty water bottle") || (lower.includes("bottle") && lower.includes("empty"))) return "Empty Water Bottle";
   if (lower.includes("oil dispenser") || lower.includes("cooking oil")) return "Cooking Oil Dispenser";

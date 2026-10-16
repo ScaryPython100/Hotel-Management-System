@@ -12,8 +12,9 @@ import {
 } from "../../types";
 import { cn } from "../../lib/utils";
 import toast from "react-hot-toast";
-import { Check, Clock, Plus, Minus, Info } from "lucide-react";
+import { Check, Clock, Plus, Minus, Info, Copy } from "lucide-react";
 import { ITEM_EMOJI_MAP } from "./RequestSuccessScreen";
+import upiQrImage from "../../assets/huesstay-upi-qr.png";
 
 interface AmenityGridSectionProps {
   activeTab: AmenitySection;
@@ -44,6 +45,38 @@ export default function AmenityGridSection({
 
   const [softDrinkOption, setSoftDrinkOption] = useState<"Coke" | "Pepsi">("Coke");
   const [tonedMilkOption, setTonedMilkOption] = useState<"200 mL" | "500 mL">("200 mL");
+  const [copiedUpi, setCopiedUpi] = useState(false);
+
+  const handleCopyUpi = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    navigator.clipboard.writeText("huesstay@okicici").catch(() => {});
+    setCopiedUpi(true);
+    toast.success("UPI ID copied: huesstay@okicici");
+    setTimeout(() => setCopiedUpi(false), 2000);
+  };
+
+  const renderPaymentQrSection = () => (
+    <div className="bg-white border border-[#E5E1DB] p-4 text-center shadow-xs mt-6">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-[#A68966] mb-2.5">
+        Payment QR Code
+      </div>
+      <div className="flex flex-col items-center justify-center">
+        <img
+          src={upiQrImage}
+          alt="Hues Stay UPI QR Code"
+          className="w-48 sm:w-52 h-auto object-contain rounded-md border border-[#E5E1DB]"
+        />
+        <button
+          type="button"
+          onClick={handleCopyUpi}
+          className="mt-2.5 text-[11px] font-medium text-[#8C857D] hover:text-[#2D2926] inline-flex items-center gap-1 cursor-pointer transition-colors"
+        >
+          {copiedUpi ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5 text-[#A68966]" />}
+          <span>{copiedUpi ? "UPI ID Copied!" : "Copy UPI ID: huesstay@okicici"}</span>
+        </button>
+      </div>
+    </div>
+  );
 
   const [itemQuantities, setItemQuantities] = useState<Record<string, number>>({
     "Maggi (₹20)": 1,
@@ -162,16 +195,7 @@ export default function AmenityGridSection({
     <div className="space-y-6">
       {/* PAGE 1: DAILY SERVICES */}
       {activeTab === "daily" && (
-        <section className="animate-fadeIn">
-          <div className="mb-4">
-            <h2 className="text-2xl font-serif italic text-[#2D2926] mb-1">
-              Page 1: Daily Service Requests
-            </h2>
-            <p className="text-xs text-[#8C857D]">
-              Complimentary bathroom refills, first aid essentials, and daily housekeeping services.
-            </p>
-          </div>
-
+        <section className="animate-fadeIn space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
             {page1Items.map((itemObj) => {
               const item = itemObj.name;
@@ -232,21 +256,14 @@ export default function AmenityGridSection({
               );
             })}
           </div>
+
+          {renderPaymentQrSection()}
         </section>
       )}
 
       {/* PAGE 2: RETURNABLE ITEMS */}
       {activeTab === "returnable" && (
-        <section className="animate-fadeIn space-y-4">
-          <div>
-            <h2 className="text-2xl font-serif italic text-[#2D2926] mb-1">
-              Page 2: Returnable Items
-            </h2>
-            <p className="text-xs text-[#8C857D]">
-              Items that are to be returned when finished so fellow guests can use them.
-            </p>
-          </div>
-
+        <section className="animate-fadeIn space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
             {page2Items.map((itemObj) => {
               const item = itemObj.name;
@@ -334,44 +351,23 @@ export default function AmenityGridSection({
               );
             })}
           </div>
+
+          {renderPaymentQrSection()}
         </section>
       )}
 
       {/* PAGE 3: F&B ESSENTIALS */}
       {activeTab === "fnb" && (
-        <section className="animate-fadeIn space-y-8">
-          <div>
-            <h2 className="text-2xl font-serif italic text-[#2D2926] mb-1">
-              Page 3: F&B Essentials & Quick Meals
-            </h2>
-            <p className="text-xs text-[#8C857D]">
-              Dining utensils, kitchen essentials with refundable deposit, and instant packaged meals.
-            </p>
-          </div>
-
+        <section className="animate-fadeIn space-y-6">
           {/* Sub-section A: Kitchen & Dining Essentials */}
           <div className="space-y-4">
             <div className="border-l-2 border-[#A68966] pl-3">
               <h3 className="font-serif text-lg text-[#2D2926]">
-                Kitchen & Dining Essentials (Refundable Deposit)
+                Kitchen & Dining Essentials
               </h3>
-              <p className="text-xs text-[#8C857D]">
-                Deposit is ₹100/- for all items. Utensils must be cleaned after use.
+              <p className="text-xs text-[#8C857D] font-medium mt-0.5">
+                * ₹100 refundable deposit per utensil (self-cleaning required)
               </p>
-            </div>
-
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-xs leading-relaxed text-[#2D2926] shadow-xs">
-              <div className="flex items-start gap-2.5">
-                <Info className="w-4 h-4 text-[#A68966] shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-semibold text-[#A68966] uppercase tracking-wider text-[11px] mb-0.5">
-                    Refundable Deposit Policy (₹100/- per item)
-                  </p>
-                  <p className="text-[#8C857D]">
-                    A refundable deposit of ₹100/- is collected for each dining utensil. Guests are kindly requested to self-clean items after use. If items are returned uncleaned, cleaning charges will be deducted from the deposit amount.
-                  </p>
-                </div>
-              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
@@ -418,11 +414,7 @@ export default function AmenityGridSection({
                       </div>
                     </div>
 
-                    <div className="pt-2 border-t border-[#E5E1DB]/60 flex items-center justify-between">
-                      <span className="text-[10px] font-semibold text-amber-900 bg-amber-50 border border-amber-200 px-2 py-0.5">
-                        ₹100/- Deposit
-                      </span>
-
+                    <div className="pt-2 border-t border-[#E5E1DB]/60 flex items-center justify-end">
                       {/* Quantity Stepper */}
                       <div
                         onClick={(e) => e.stopPropagation()}
@@ -457,11 +449,8 @@ export default function AmenityGridSection({
           <div className="space-y-4 pt-4 border-t border-[#E5E1DB]">
             <div className="border-l-2 border-[#A68966] pl-3">
               <h3 className="font-serif text-lg text-[#2D2926]">
-                Quick Food Items (Direct Purchase)
+                Quick Food Items
               </h3>
-              <p className="text-xs text-[#8C857D]">
-                Snacks, ingredients and beverages delivered fresh to your door.
-              </p>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
@@ -678,6 +667,8 @@ export default function AmenityGridSection({
               })}
             </div>
           </div>
+
+          {renderPaymentQrSection()}
         </section>
       )}
     </div>

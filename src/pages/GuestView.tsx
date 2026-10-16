@@ -816,15 +816,11 @@ export default function GuestView() {
       <Toaster position="top-center" />
       
       {/* Header */}
-      <header className="h-44 bg-[#1A1A1A] text-white p-8 flex flex-col justify-end relative mb-6 shadow-md">
-        <div className="absolute top-6 left-8 text-[11px] uppercase tracking-[0.25em] text-[#CBB99D] font-medium">
-          Hues Stay Luxury Rooms
-        </div>
-        <div className="max-w-4xl mx-auto w-full text-left">
-          <h1 className="text-4xl font-serif italic mb-1 text-white">Room {roomNumber}</h1>
-          <p className="text-xs sm:text-sm text-neutral-300 max-w-md">
-            Welcome! Select services, borrow appliances, or order F&B essentials below.
-          </p>
+      <header className="bg-[#1A1A1A] text-white py-3.5 px-4 sm:px-6 mb-4 shadow-xs">
+        <div className="max-w-4xl mx-auto text-center">
+          <h1 className="text-xl sm:text-2xl font-serif italic text-white tracking-wide">
+            Room {roomNumber}
+          </h1>
         </div>
       </header>
 
@@ -846,88 +842,69 @@ export default function GuestView() {
             </div>
           </div>
 
-          {/* Hotel Key Info Cards: WiFi, Supervisor, Drinking Water, Self Cooking Kitchen */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {/* Hotel Key Info Cards: WiFi, Supervisor, Water Dispensers, Self Service Kitchen */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 sm:gap-3">
             {/* WiFi */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
               <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
                 <Wifi className="w-3.5 h-3.5" />
                 <span className="text-[10px] font-semibold uppercase tracking-wider">WiFi Password</span>
               </div>
-              <div className="font-mono font-bold text-xs sm:text-sm text-[#2D2926] truncate">
-                HuesStay123@
+              <div className="flex items-center justify-center gap-1.5 font-mono font-bold text-xs sm:text-sm text-[#2D2926]">
+                <span>HuesStay123@</span>
+                <button
+                  type="button"
+                  onClick={handleCopyWifi}
+                  title="Copy WiFi Password"
+                  aria-label="Copy WiFi Password"
+                  className="p-1 text-[#A68966] hover:text-[#8E7455] transition-colors cursor-pointer inline-flex items-center"
+                >
+                  {copiedWifi ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={handleCopyWifi}
-                className="mt-2 text-[10px] uppercase font-bold tracking-wider text-[#A68966] hover:text-[#8E7455] flex items-center justify-center gap-1 cursor-pointer"
-              >
-                {copiedWifi ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
-                {copiedWifi ? "Copied" : "Copy"}
-              </button>
             </div>
 
             {/* Supervisor */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
               <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
                 <Phone className="w-3.5 h-3.5" />
                 <span className="text-[10px] font-semibold uppercase tracking-wider">Supervisor</span>
               </div>
-              <a
-                href="tel:8431995152"
-                className="font-mono font-bold text-xs sm:text-sm text-[#2D2926] hover:underline"
-              >
-                8431995152
-              </a>
-              <a
-                href="tel:8431995152"
-                className="mt-2 text-[10px] uppercase font-bold tracking-wider text-[#A68966] hover:text-[#8E7455] flex items-center justify-center gap-1"
-              >
-                <Phone className="w-3 h-3" />
-                Call Now
-              </a>
+              <div className="flex items-center justify-center gap-1.5 font-mono font-bold text-xs sm:text-sm text-[#2D2926]">
+                <a href="tel:8431995152" className="hover:underline">
+                  8431995152
+                </a>
+                <a
+                  href="tel:8431995152"
+                  title="Call Supervisor"
+                  aria-label="Call Supervisor"
+                  className="p-1 text-[#A68966] hover:text-[#8E7455] transition-colors inline-flex items-center"
+                >
+                  <Phone className="w-3.5 h-3.5" />
+                </a>
+              </div>
             </div>
 
-            {/* Drinking Water */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+            {/* Water Dispensers */}
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
               <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
-                <Droplets className="w-3.5 h-3.5" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider">Water</span>
+                <Droplets className="w-3.5 h-3.5 shrink-0" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap">Water Dispensers</span>
               </div>
               <div className="font-serif text-xs sm:text-sm text-[#2D2926] font-medium leading-tight">
                 G, 3rd & Terrace
               </div>
-              <span className="mt-2 text-[10px] text-[#8C857D] italic">
-                Water Dispensers
-              </span>
             </div>
 
-            {/* Self Cooking Kitchen */}
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+            {/* Self Service Kitchen */}
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-2.5 sm:p-3 text-center flex flex-col items-center justify-center shadow-2xs">
               <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
-                <Utensils className="w-3.5 h-3.5" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider">Kitchen</span>
+                <Utensils className="w-3.5 h-3.5 shrink-0" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap">Self Service Kitchen</span>
               </div>
               <div className="font-serif text-xs sm:text-sm text-[#2D2926] font-medium leading-tight">
                 Ground Floor
               </div>
-              <span className="mt-2 text-[10px] text-[#8C857D] italic">
-                Self Cooking Area
-              </span>
-            </div>
-          </div>
-
-          {/* PAYMENT QR CODE */}
-          <div className="bg-white border border-[#E5E1DB] p-6 text-center shadow-xs">
-            <h3 className="font-serif text-xl sm:text-2xl font-medium text-[#2D2926] mb-4">
-              Payment QR Code
-            </h3>
-            <div className="flex justify-center items-center">
-              <img
-                src={upiQrImage}
-                alt="Payment QR Code"
-                className="w-56 h-56 sm:w-64 sm:h-64 object-contain border border-[#E5E1DB] p-2 bg-white shadow-2xs"
-              />
             </div>
           </div>
 
@@ -1074,13 +1051,6 @@ export default function GuestView() {
               className="w-full p-4 sm:p-5 border border-[#E5E1DB] bg-white text-[#2D2926] placeholder:text-[#8C857D] focus:outline-none focus:border-[#A68966] min-h-[110px] resize-none rounded-none text-sm"
             ></textarea>
           </section>
-
-          <div className="bg-white border border-[#E5E1DB] p-4 sm:p-5 flex gap-3 text-[#8C857D] text-xs">
-            <Info className="w-5 h-5 shrink-0 text-[#A68966]" />
-            <p className="italic leading-relaxed">
-              Your request will be dispatched instantly to our on-duty housekeeping team. Returnable appliances and dining utensils will be brought to Room {roomNumber} promptly.
-            </p>
-          </div>
 
           <button
             type="submit"
