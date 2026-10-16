@@ -1,7 +1,7 @@
 import React from "react";
 import { RoomRequest } from "../../types";
 import { formatDistanceToNow } from "date-fns";
-import { CheckCircle2, Clock, Trash2, BedDouble } from "lucide-react";
+import { CheckCircle2, Clock, Trash2, BedDouble, Zap } from "lucide-react";
 
 interface RoomGroupCardProps {
   roomId: string;
@@ -35,11 +35,17 @@ export default function RoomGroupCard({
       <div className="flex-1 space-y-6">
         {requests.map((request, idx) => (
           <div key={request.id || idx} className="relative">
-            <div className="flex justify-between items-start mb-2">
+            <div className="flex justify-between items-start mb-2 gap-2 flex-wrap">
               <div className="flex items-center text-[10px] uppercase tracking-widest text-[#8C857D] font-medium">
                 <Clock className="w-3 h-3 mr-1.5" />
                 {formatDistanceToNow(request.createdAt, { addSuffix: true })}
               </div>
+              {request.isWaitlist && (
+                <span className="bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-xs flex items-center gap-1">
+                  <Zap className="w-2.5 h-2.5 text-amber-600 fill-amber-500" />
+                  Waitlist #{request.queuePosition || 1} • Floor Relay Pending
+                </span>
+              )}
             </div>
 
             <div className="space-y-3 pl-4 border-l-2 border-[#E5E1DB]">

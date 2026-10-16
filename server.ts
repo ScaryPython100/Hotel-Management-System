@@ -14,6 +14,8 @@ import {
   BorrowedRecord,
   saveBorrowedToSupabase,
   markBorrowedReturnedInSupabase,
+  relayBorrowedItemInSupabase,
+  updateRequestStatusInSupabase,
   fetchBorrowedFromSupabase,
   deleteBorrowedFromSupabase,
   SUPABASE_TABLE_SQL,
@@ -47,6 +49,9 @@ interface ServerRequest {
   customMessage: string;
   status: "pending" | "completed";
   createdAt: number;
+  isWaitlist?: boolean;
+  waitlistForItem?: string;
+  queuePosition?: number;
 }
 
 // In-memory requests store on server
@@ -123,6 +128,7 @@ function loadInventoryLimits(): Record<string, number> {
     "Kettle": 5,
     "Hair Dryer": 2,
     "Laptop Table": 2,
+    "Hot Pack": 2,
     "Leg Massager (Paid)": 1,
     "Glasses (Set of 2)": 10,
     "USB 3.0 Cable + Adaptor": 2,
@@ -221,6 +227,7 @@ function reconcileServerAutoAvailability() {
     "Kettle",
     "Hair Dryer",
     "Laptop Table",
+    "Hot Pack",
     "Leg Massager (Paid)",
     "Glasses (Set of 2)",
     "USB 3.0 Cable + Adaptor",
@@ -419,14 +426,17 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
   // POST new request
   app.post("/api/requests", async (req, res) => {
-    const { roomId, items, customMessage, status, createdAt, id: providedId } = req.body;
+    const { roomId, items, customMessage, status, createdAt, id: providedId, isWaitlist, waitlistForItem, queuePosition } = req.body;
     const newReq: ServerRequest = {
       id: providedId || `srv-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
       roomId: String(roomId || "Unknown"),
       items: Array.isArray(items) ? items : [],
       customMessage: customMessage || "",
       status: status || "pending",
-      createdAt: createdAt || Date.now()
+      createdAt: createdAt || Date.now(),
+      isWaitlist: Boolean(isWaitlist),
+      waitlistForItem: waitlistForItem || undefined,
+      queuePosition: typeof queuePosition === "number" ? queuePosition : undefined
     };
 
     // If serverRequests is empty (e.g. fresh reboot), populate from Supabase
@@ -482,7 +492,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
           return false;
         });
 
-    if (unavailableItems.length > 0 && !newReq.customMessage) {
+    if (unavailableItems.length > 0 && !newReq.customMessage && !newReq.isWaitlist) {
       return res.status(400).json({
         success: false,
         error: `${unavailableItems.join(", ")} is currently unavailable and cannot be requested.`
@@ -614,6 +624,57 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     deleteBorrowedFromSupabase(id).catch(e => console.warn("[SUPABASE] Delete borrowed error:", e));
     reconcileServerAutoAvailability();
     res.json({ success: true, message: "Borrowed item removed" });
+  });
+
+  // POST /api/borrowed/relay (Floor-to-Floor Relay handoff directly from Room A to Room B)
+  app.post("/api/borrowed/relay", async (req, res) => {
+    const { sourceBorrowedId, sourceRoomId, targetRoomId, itemName, targetRequestId, currentRelayCount } = req.body;
+    if (!sourceRoomId || !targetRoomId || !itemName) {
+      return res.status(400).json({ error: "Missing required relay parameters (sourceRoomId, targetRoomId, itemName)" });
+    }
+
+    const cleanItemName = normalizeReturnableName(String(itemName));
+    const newRelayCount = (Number(currentRelayCount) || 0) + 1;
+    const now = Date.now();
+
+    // 1. Mark source borrowed record as returned in memory
+    if (sourceBorrowedId) {
+      const src = serverBorrowed.find(b => b.id === sourceBorrowedId);
+      if (src) {
+        src.status = "returned";
+        src.returnedAt = now;
+      }
+      markBorrowedReturnedInSupabase(sourceBorrowedId).catch(e => console.warn("[SUPABASE] Relay mark returned error:", e));
+    }
+
+    // 2. Create new active borrowed item for target room
+    const newBorrowedItem: BorrowedRecord = {
+      id: `borrowed-${now}-${Math.random().toString(36).substr(2, 6)}`,
+      roomId: String(targetRoomId),
+      itemName: cleanItemName,
+      status: "borrowed",
+      createdAt: now,
+      requestId: targetRequestId ? String(targetRequestId) : undefined,
+      relayedFromRoom: String(sourceRoomId),
+      relayCount: newRelayCount
+    };
+
+    serverBorrowed.unshift(newBorrowedItem);
+    saveBorrowedToSupabase(newBorrowedItem).catch(e => console.warn("[SUPABASE] Relay save new borrowed error:", e));
+
+    // 3. Complete target waitlist request
+    if (targetRequestId) {
+      const targetReq = serverRequests.find(r => r.id === targetRequestId);
+      if (targetReq) {
+        targetReq.status = "completed";
+      }
+      updateRequestStatusInSupabase(targetRequestId, "completed").catch(e => console.warn("[SUPABASE] Relay complete target request error:", e));
+    }
+
+    // Maintain single-unit inventory lock inUse = 1
+    reconcileServerAutoAvailability();
+
+    res.json({ success: true, item: newBorrowedItem });
   });
 
   // ============================================

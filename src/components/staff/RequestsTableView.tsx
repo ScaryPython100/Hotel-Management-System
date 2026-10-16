@@ -158,6 +158,13 @@ export default function RequestsTableView({
 
                     {/* Requests Asked */}
                     <td className="py-3 px-4 text-[#2D2926]">
+                      {req.isWaitlist && (
+                        <div className="mb-1">
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-bold uppercase tracking-wider rounded-xs">
+                            Waitlist #{req.queuePosition || 1} (Relay)
+                          </span>
+                        </div>
+                      )}
                       {req.items && req.items.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
                           {req.items.map((item, idx) => (

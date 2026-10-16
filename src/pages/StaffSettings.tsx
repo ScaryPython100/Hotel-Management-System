@@ -1,7 +1,18 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { doc, getDoc, setDoc, collection, getDocs, updateDoc, addDoc, query, where } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { COMMON_ITEMS, DEFAULT_AMENITY_STATUS, TARGET_AUTO_UNAVAILABLE_ITEMS, DEFAULT_INVENTORY_LIMITS } from "../types";
+import { 
+  COMMON_ITEMS, 
+  DEFAULT_AMENITY_STATUS, 
+  TARGET_AUTO_UNAVAILABLE_ITEMS, 
+  DEFAULT_INVENTORY_LIMITS,
+  PAGE_1_DAILY_ITEMS,
+  PAGE_2_RETURNABLE_ITEMS,
+  PAGE_3_FNB_DEPOSIT_ITEMS,
+  PAGE_3_QUICK_FOOD_ITEMS,
+  isReturnableItem,
+  normalizeReturnableName
+} from "../types";
 import { 
   fetchLiveAmenitiesStatus, 
   saveLiveAmenitiesStatus, 
@@ -19,10 +30,16 @@ import {
   Package, 
   RefreshCw,
   Plus,
-  Trash2
+  Trash2,
+  Minus,
+  Utensils,
+  Sparkles,
+  Coffee,
+  X
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import { useOutletContext } from "react-router-dom";
+import { ITEM_EMOJI_MAP } from "../components/guest/RequestSuccessScreen";
 
 function isCorruptOrDuplicateItem(name: string): boolean {
   if (!name) return true;
@@ -70,7 +87,7 @@ export default function StaffSettings() {
   const [inventoryMap, setInventoryMap] = useState<Record<string, { id?: string, limit: number, inUse: number }>>(() => {
     const init: Record<string, { id?: string, limit: number, inUse: number }> = {};
     COMMON_ITEMS.filter(i => i.category === 'Item').forEach(item => {
-      init[item.name] = { inUse: 0, limit: item.defaultLimit || 1 };
+      init[item.name] = { inUse: 0, limit: item.defaultLimit || DEFAULT_INVENTORY_LIMITS[item.name] || 1 };
     });
     try {
       const saved = localStorage.getItem("hues_stay_inventory");
@@ -114,8 +131,9 @@ export default function StaffSettings() {
     return [];
   });
 
-  // Dynamic new item state for owner
+  // Dynamic new item state
   const [newItemName, setNewItemName] = useState("");
+  const [newItemCategory, setNewItemCategory] = useState<"daily" | "returnable" | "fnb_deposit" | "quick_food">("returnable");
   const [newItemLimit, setNewItemLimit] = useState("5");
   const [isAddingItem, setIsAddingItem] = useState(false);
 
@@ -163,7 +181,7 @@ export default function StaffSettings() {
             }
           } catch (e) {}
 
-          // 2. Fetch amenities from Server API (fallback if Supabase offline)
+          // 2. Fetch amenities from Server API (fallback)
           if (!liveAmenitiesFetched) {
             try {
               const apiRes = await fetch("/api/settings/amenities");
@@ -184,27 +202,6 @@ export default function StaffSettings() {
                     return next;
                   });
                 }
-              }
-            } catch (e) {}
-          }
-
-          // 3. Fetch amenities from Firestore (fallback if neither Supabase nor Server API answered)
-          if (!liveAmenitiesFetched) {
-            try {
-              const docRef = doc(db, "settings", "amenities");
-              const docSnap = await getDoc(docRef);
-              if (docSnap.exists() && isMounted) {
-                const dbData = docSnap.data();
-                setAmenityStatus(prev => {
-                  const next = { ...prev };
-                  COMMON_ITEMS.forEach(item => {
-                    if (dbData[item.name]) next[item.name] = dbData[item.name];
-                  });
-                  try {
-                    localStorage.setItem("hues_stay_amenities", JSON.stringify(next));
-                  } catch (e) {}
-                  return next;
-                });
               }
             } catch (e) {}
           }
@@ -260,13 +257,13 @@ export default function StaffSettings() {
               setAmenityStatus(prev => ({ ...prev, ...freshStatus }));
             }
           } catch (e) {
-            console.warn("Live limits & auto-availability sync note:", e);
+            console.warn("Live limits sync note:", e);
           }
         })();
 
         await Promise.race([loadTask, timeoutPromise]);
       } catch (err: any) {
-        console.warn("Settings sync timed out or offline, loaded locally:", err?.message || "offline");
+        console.warn("Settings sync timed out or offline:", err?.message || "offline");
       } finally {
         if (isMounted) {
           setIsSyncingWithCloud(false);
@@ -293,19 +290,21 @@ export default function StaffSettings() {
         localStorage.setItem("hues_stay_amenities", JSON.stringify(updated));
       } catch (e) {}
 
-      // If user manually changed status, this item is a manual choice, NOT an auto-depleted item
-      fetchLiveAutoDepleted().then(autoList => {
-        const set = new Set(autoList);
-        if (set.has(itemName)) {
-          set.delete(itemName);
-          saveLiveAutoDepleted(Array.from(set)).catch(() => {});
-        }
-      }).catch(() => {});
+      // If staff manually set to available, clear from auto-depleted so system won't undo it
+      if (nextStatus === 'available') {
+        fetchLiveAutoDepleted().then(autoList => {
+          const set = new Set(autoList);
+          if (set.has(itemName)) {
+            set.delete(itemName);
+            saveLiveAutoDepleted(Array.from(set)).catch(() => {});
+          }
+        }).catch(() => {});
+      }
 
       // Automatically sync to Supabase so desktop & mobile update in real-time
       saveLiveAmenitiesStatus(updated).then(() => {
-        setLastSavedMsg(`"${itemName}" marked as ${nextStatus === 'available' ? 'Available' : 'Unavailable'} (synced across all devices)`);
-        setTimeout(() => setLastSavedMsg(null), 3500);
+        setLastSavedMsg(`"${itemName}" marked as ${nextStatus === 'available' ? 'Available' : 'Unavailable'}`);
+        setTimeout(() => setLastSavedMsg(null), 3000);
       }).catch(() => {});
 
       toast.success(`${itemName} is now ${nextStatus === 'available' ? 'Available' : 'Unavailable'}`);
@@ -314,9 +313,9 @@ export default function StaffSettings() {
     });
   };
 
-  const handleLimitChange = (itemName: string, newLimit: string) => {
-    const num = parseInt(newLimit, 10);
-    if (isNaN(num) || num < 1) return;
+  const handleLimitChange = (itemName: string, newLimit: string | number) => {
+    const num = typeof newLimit === "number" ? newLimit : parseInt(newLimit, 10);
+    if (isNaN(num) || num < 0) return;
 
     setInventoryMap(prev => {
       const updated = {
@@ -342,7 +341,6 @@ export default function StaffSettings() {
     });
   };
 
-  // Add a new inventory item dynamically (Owner feature: creates row in Supabase and adds to app)
   const handleAddNewItem = async (e: React.FormEvent) => {
     e.preventDefault();
     const clean = newItemName.trim();
@@ -379,7 +377,7 @@ export default function StaffSettings() {
       localStorage.setItem("hues_stay_amenities", JSON.stringify(updatedAmenity));
     } catch (e) {}
 
-    // 3. Immediately persist limits and availability to Supabase so it NEVER disappears
+    // 3. Immediately persist limits and availability to Supabase
     const limitsOnly: Record<string, number> = {};
     Object.keys(updatedInv).forEach(k => {
       limitsOnly[k] = updatedInv[k].limit;
@@ -398,37 +396,21 @@ export default function StaffSettings() {
       })
     }).catch(() => {});
 
-    // 5. Sync to Firestore
-    try {
-      const invQ = query(collection(db, "inventory"), where("name", "==", clean));
-      const snap = await getDocs(invQ);
-      if (snap.empty) {
-        await addDoc(collection(db, "inventory"), {
-          name: clean,
-          inUse: 0,
-          limit: limitNum
-        });
-      }
-    } catch (e) {}
-
     toast.success(`"${clean}" added to Inventory & Guest View!`);
     setNewItemName("");
     setNewItemLimit("5");
     setIsAddingItem(false);
   };
 
-  // Permanently delete an item from inventory and guest menus
   const handleDeleteItem = async (itemName: string) => {
-    if (!window.confirm(`Are you sure you want to permanently delete "${itemName}"?\n\nIt will be removed immediately from all guest rooms and staff settings across all devices.`)) {
+    if (!window.confirm(`Are you sure you want to permanently delete "${itemName}"?\n\nIt will be removed immediately from all guest rooms and staff settings.`)) {
       return;
     }
 
-    // 1. Add to permanently deleted items in Supabase
     const nextDeleted = Array.from(new Set([...deletedItems, itemName]));
     setDeletedItems(nextDeleted);
     await saveLiveDeletedItems(nextDeleted);
 
-    // 2. Remove from local inventory map
     const updatedInv = { ...inventoryMap };
     delete updatedInv[itemName];
     setInventoryMap(updatedInv);
@@ -436,7 +418,6 @@ export default function StaffSettings() {
       localStorage.setItem("hues_stay_inventory", JSON.stringify(updatedInv));
     } catch (e) {}
 
-    // 3. Remove from amenity status
     const updatedAmenity = { ...amenityStatus };
     delete updatedAmenity[itemName];
     setAmenityStatus(updatedAmenity);
@@ -444,7 +425,6 @@ export default function StaffSettings() {
       localStorage.setItem("hues_stay_amenities", JSON.stringify(updatedAmenity));
     } catch (e) {}
 
-    // 4. Save updated limits and amenities to Supabase
     const limitsOnly: Record<string, number> = {};
     Object.keys(updatedInv).forEach(k => {
       limitsOnly[k] = updatedInv[k].limit;
@@ -452,7 +432,6 @@ export default function StaffSettings() {
     await saveLiveInventoryLimits(limitsOnly);
     await saveLiveAmenitiesStatus(updatedAmenity);
 
-    // 5. Also sync to server API
     fetch("/api/settings/save-all", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -463,155 +442,92 @@ export default function StaffSettings() {
       })
     }).catch(() => {});
 
-    // 6. Delete from Firestore if exists
-    try {
-      const invQ = query(collection(db, "inventory"), where("name", "==", itemName));
-      const snap = await getDocs(invQ);
-      snap.forEach(d => {
-        import("firebase/firestore").then(({ deleteDoc }) => deleteDoc(d.ref).catch(() => {}));
-      });
-    } catch (e) {}
-
-    toast.success(`"${itemName}" deleted permanently across all devices.`);
+    toast.success(`"${itemName}" deleted.`);
   };
 
   const handleSave = async () => {
     setSaving(true);
     setLastSavedMsg(null);
 
-    // Hard fail-safe watchdog: Guarantee button returns to ready state under all conditions
     const safetyWatchdog = setTimeout(() => {
       setSaving(false);
     }, 1500);
 
     try {
-      // 1. Save locally first (instant synchronous persistence)
       localStorage.setItem("hues_stay_amenities", JSON.stringify(amenityStatus));
       localStorage.setItem("hues_stay_inventory", JSON.stringify(inventoryMap));
       if (superhostPin.trim()) {
         localStorage.setItem("hues_stay_superhost_pin", superhostPin.trim());
       }
 
-      // 2. Persist to Supabase directly for guaranteed instant multi-device sync
       await saveLiveAmenitiesStatus(amenityStatus);
 
-      // Clean up autoDepletedSet: any items the user marked out_of_service that are not genuinely depleted
-      // should be removed from autoDepletedSet so auto-replenishment never overrides them
-      try {
-        const autoList = await fetchLiveAutoDepleted();
-        const set = new Set(autoList);
-        let autoChanged = false;
-        TARGET_AUTO_UNAVAILABLE_ITEMS.forEach(item => {
-          if (amenityStatus[item] === 'out_of_service') {
-            const inv = inventoryMap[item];
-            const inUse = inv?.inUse || 0;
-            const limit = inv?.limit || DEFAULT_INVENTORY_LIMITS[item] || 1;
-            if (inUse < limit && set.has(item)) {
-              set.delete(item);
-              autoChanged = true;
-            }
-          }
-        });
-        if (autoChanged) {
-          await saveLiveAutoDepleted(Array.from(set));
-        }
-      } catch (e) {}
-
-      // Persist inventory limits to Supabase directly
       const limitsOnly: Record<string, number> = {};
       Object.keys(inventoryMap).forEach(k => {
         limitsOnly[k] = inventoryMap[k].limit;
       });
       await saveLiveInventoryLimits(limitsOnly);
 
-      // 3. Persist to server API and disk (.data/amenities_settings.json) with strict 1.2s timeout
-      const controller = new AbortController();
-      const fetchTimeout = setTimeout(() => controller.abort(), 1200);
+      fetch("/api/settings/save-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amenities: amenityStatus,
+          inventory: inventoryMap,
+          pin: superhostPin.trim()
+        })
+      }).catch(() => {});
 
-      try {
-        await fetch("/api/settings/save-all", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({
-            amenities: amenityStatus,
-            inventory: inventoryMap,
-            pin: superhostPin.trim()
-          })
-        });
-      } catch (err) {
-        console.warn("Server settings sync warning (saved locally):", err);
-      } finally {
-        clearTimeout(fetchTimeout);
-      }
-
-      // 3. Fire-and-forget: Sync inventory to Supabase & Firestore completely in background
-      const allItemNames = Object.keys(inventoryMap);
-      setTimeout(() => {
-        // Supabase sync
-        for (const name of allItemNames) {
-          const invData = inventoryMap[name];
-          if (invData) {
-            fetch(`/api/inventory/${encodeURIComponent(name)}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ totalStock: invData.limit, taken: invData.inUse })
-            }).catch(() => {});
-          }
-        }
-
-        // Firestore sync (concurrent updates)
-        (async () => {
-          try {
-            await setDoc(doc(db, "settings", "amenities"), amenityStatus, { merge: true });
-          } catch (e) {}
-
-          try {
-            await Promise.all(
-              allItemNames
-                .map(name => inventoryMap[name])
-                .filter((invData): invData is { id: string; limit: number; inUse: number } => Boolean(invData?.id))
-                .map(invData => updateDoc(doc(db, "inventory", invData.id), { limit: invData.limit }))
-            );
-          } catch (e) {}
-        })();
-      }, 0);
-
-      const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setLastSavedMsg(`Settings saved successfully at ${nowTime}`);
       toast.success("Settings & Inventory saved successfully!");
     } catch (error: any) {
       console.error("Error saving settings:", error?.message || "error");
-      const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      setLastSavedMsg(`Settings saved at ${nowTime}`);
-      toast.success("Settings saved!");
+      toast.success("Settings saved locally!");
     } finally {
       clearTimeout(safetyWatchdog);
       setSaving(false);
     }
   };
 
-  // Combine default items with any dynamically added items from the database/owner
-  const allDisplayItems = React.useMemo(() => {
-    const deletedSet = new Set(deletedItems);
-    const itemMap = new Map<string, { name: string, category: 'Service' | 'Item', isLimited?: boolean }>();
-    COMMON_ITEMS.filter(i => !deletedSet.has(i.name)).forEach(i => itemMap.set(i.name, i));
-    Object.keys(inventoryMap).forEach(name => {
-      if (!deletedSet.has(name) && !isCorruptOrDuplicateItem(name) && !itemMap.has(name)) {
-        itemMap.set(name, { name, category: 'Item', isLimited: true });
-      }
-    });
-    return Array.from(itemMap.values());
-  }, [inventoryMap, deletedItems]);
+  // Group items by category for clean staff presentation
+  const deletedSet = useMemo(() => new Set(deletedItems), [deletedItems]);
+
+  const page1Items = useMemo(() => {
+    return PAGE_1_DAILY_ITEMS.filter(i => !deletedSet.has(i.name));
+  }, [deletedSet]);
+
+  const page2Items = useMemo(() => {
+    return PAGE_2_RETURNABLE_ITEMS.filter(i => !deletedSet.has(i.name));
+  }, [deletedSet]);
+
+  const page3DepositItems = useMemo(() => {
+    return PAGE_3_FNB_DEPOSIT_ITEMS.filter(i => !deletedSet.has(i.name));
+  }, [deletedSet]);
+
+  const page3QuickFoodItems = useMemo(() => {
+    return PAGE_3_QUICK_FOOD_ITEMS.filter(i => !deletedSet.has(i.name));
+  }, [deletedSet]);
+
+  // Any custom items added by staff that aren't in canonical lists
+  const customItems = useMemo(() => {
+    const canonicalNames = new Set(COMMON_ITEMS.map(i => i.name));
+    return Object.keys(inventoryMap).filter(k => 
+      !deletedSet.has(k) && 
+      !isCorruptOrDuplicateItem(k) && 
+      !canonicalNames.has(k)
+    );
+  }, [inventoryMap, deletedSet]);
 
   return (
-    <div className="p-8 md:p-12 w-full max-w-4xl">
+    <div className="p-6 md:p-12 w-full max-w-5xl mx-auto">
       <Toaster position="top-right" />
+      
       {/* Header */}
       <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <div className="flex items-center gap-3">
-            <h2 className="text-3xl font-serif italic">Service Settings</h2>
+          <div className="flex items-center gap-3 mb-1">
+            <h2 className="text-3xl font-serif italic text-[#2D2926]">Staff Settings & Inventory</h2>
             {isSyncingWithCloud && (
               <span className="flex items-center text-xs text-[#8C857D] gap-1 bg-[#EFECE8] px-2 py-0.5 rounded">
                 <RefreshCw className="w-3 h-3 animate-spin" />
@@ -619,218 +535,573 @@ export default function StaffSettings() {
               </span>
             )}
           </div>
-          <p className="text-[#8C857D] text-sm max-w-xl mt-1">
-            Manage amenity availability and inventory limits across all hotel rooms and Supabase database.
+          <p className="text-[#8C857D] text-xs sm:text-sm max-w-2xl">
+            Easily manage item availability, stock limits, and additions across the 3 guest pages.
           </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setIsAddingItem(!isAddingItem)}
+            className="px-4 py-2 border border-[#2D2926] bg-[#2D2926] text-white hover:bg-neutral-800 text-xs font-semibold uppercase tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+          >
+            {isAddingItem ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+            {isAddingItem ? "Close Form" : "Add New Item"}
+          </button>
         </div>
       </div>
 
-      <div className="bg-white border border-[#E5E1DB] p-8 shadow-sm space-y-12">
-        {/* Amenity Availability Section */}
-        <div>
-          <h3 className="font-serif text-xl mb-2">Amenity Availability</h3>
-          <p className="text-[#8C857D] text-sm mb-6">
-            Click on any amenity to toggle its status between Available and Out of Service.
-          </p>
-          
+      {/* Dynamic Add New Item Form */}
+      {isAddingItem && (
+        <form onSubmit={handleAddNewItem} className="mb-8 p-6 border border-[#A68966] bg-[#FAF8F5] shadow-sm animate-fadeIn">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-serif text-lg font-medium text-[#2D2926] flex items-center gap-2">
+              <Plus className="w-4 h-4 text-[#A68966]" />
+              Add Item to Guest Menu & Inventory
+            </h3>
+            <button
+              type="button"
+              onClick={() => setIsAddingItem(false)}
+              className="text-[#8C857D] hover:text-[#2D2926] p-1"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <div>
+              <label htmlFor="new-item-category" className="block text-xs uppercase tracking-wider text-[#2D2926] font-semibold mb-1">
+                Category / Section
+              </label>
+              <select
+                id="new-item-category"
+                value={newItemCategory}
+                onChange={(e: any) => setNewItemCategory(e.target.value)}
+                className="w-full p-2.5 border border-[#E5E1DB] bg-white text-xs sm:text-sm focus:outline-none focus:border-[#A68966]"
+              >
+                <option value="daily">Page 1: Daily Service Request</option>
+                <option value="returnable">Page 2: Returnable Appliance</option>
+                <option value="fnb_deposit">Page 3: F&B Dining Utensil (Deposit)</option>
+                <option value="quick_food">Page 3: Quick Food Item</option>
+              </select>
+            </div>
+
+            <div className="md:col-span-1">
+              <label htmlFor="new-item-name" className="block text-xs uppercase tracking-wider text-[#2D2926] font-semibold mb-1">
+                Item Name
+              </label>
+              <input
+                id="new-item-name"
+                type="text"
+                required
+                placeholder="e.g. Yoga Mat, Extension Board, Apple Juice"
+                value={newItemName}
+                onChange={(e) => setNewItemName(e.target.value)}
+                className="w-full p-2.5 border border-[#E5E1DB] bg-white text-xs sm:text-sm focus:outline-none focus:border-[#A68966]"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="new-item-stock" className="block text-xs uppercase tracking-wider text-[#2D2926] font-semibold mb-1">
+                Total Stock Quantity
+              </label>
+              <input
+                id="new-item-stock"
+                type="number"
+                min="1"
+                required
+                value={newItemLimit}
+                onChange={(e) => setNewItemLimit(e.target.value)}
+                className="w-full p-2.5 border border-[#E5E1DB] bg-white text-xs sm:text-sm text-center focus:outline-none focus:border-[#A68966]"
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              className="px-6 py-2.5 bg-[#A68966] text-white text-xs font-semibold uppercase tracking-widest hover:bg-[#8E7455] transition-colors cursor-pointer"
+            >
+              Save & Add to System
+            </button>
+          </div>
+        </form>
+      )}
+
+      <div className="space-y-10">
+        {/* SECTION 1: DAILY SERVICE REQUESTS */}
+        <section className="bg-white border border-[#E5E1DB] p-6 shadow-sm">
+          <div className="border-b border-[#E5E1DB] pb-4 mb-6 flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-[#A68966]" />
+                <h3 className="font-serif text-xl font-medium text-[#2D2926]">
+                  Page 1: Daily Service Requests
+                </h3>
+              </div>
+              <p className="text-xs text-[#8C857D] mt-0.5">
+                Complimentary room services, bathroom refills, and housekeeping.
+              </p>
+            </div>
+            <span className="text-xs font-medium text-[#8C857D] bg-[#FAF8F5] border border-[#E5E1DB] px-2.5 py-1">
+              {page1Items.length} Services
+            </span>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {allDisplayItems.map((item) => {
+            {page1Items.map((item) => {
               const isAvailable = amenityStatus[item.name] !== 'out_of_service';
-              
+              const emoji = ITEM_EMOJI_MAP[item.name] || "✨";
+
               return (
-                <button
-                  type="button"
+                <div
                   key={item.name}
-                  onClick={() => toggleStatus(item.name)}
-                  className={`flex items-center justify-between p-4 border transition-colors ${
-                    isAvailable ? "bg-[#F9F7F4] border-[#E5E1DB]" : "bg-red-50 border-red-200"
+                  className={`p-4 border flex flex-col justify-between transition-colors ${
+                    isAvailable ? "bg-[#FAF8F5] border-[#E5E1DB]" : "bg-red-50/70 border-red-200"
                   }`}
                 >
-                  <div className="text-left">
-                    <span className={`font-medium block ${isAvailable ? "text-[#2D2926]" : "text-red-800"}`}>
-                      {item.name}
-                    </span>
-                    <span className={`text-[10px] uppercase tracking-widest ${isAvailable ? "text-[#8C857D]" : "text-red-600"}`}>
-                      {item.category}
-                    </span>
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <div>
+                      <span className="font-serif text-base text-[#2D2926] font-medium flex items-center gap-2">
+                        <span className="text-lg">{emoji}</span>
+                        <span>{item.name}</span>
+                      </span>
+                      {item.badge && (
+                        <span className="inline-block mt-1 text-[10px] uppercase font-bold text-[#A68966] bg-white border border-[#E5E1DB] px-1.5 py-0.5">
+                          {item.badge}
+                        </span>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => toggleStatus(item.name)}
+                      className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border shrink-0 transition-colors cursor-pointer ${
+                        isAvailable
+                          ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                          : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                      }`}
+                    >
+                      {isAvailable ? "Available" : "Unavailable"}
+                    </button>
                   </div>
-                  
-                  {isAvailable ? (
-                    <span className="flex items-center text-xs uppercase tracking-widest text-green-700 font-bold shrink-0">
-                      <CheckCircle2 className="w-4 h-4 mr-2" />
-                      Available
-                    </span>
-                  ) : (
-                    <span className="flex items-center text-xs uppercase tracking-widest text-red-600 font-bold shrink-0">
-                      <ShieldAlert className="w-4 h-4 mr-2" />
-                      Unavailable
-                    </span>
-                  )}
-                </button>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-[#E5E1DB]/60 text-xs text-[#8C857D]">
+                    <span className="italic">Service on demand</span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteItem(item.name)}
+                      className="text-red-600 hover:text-red-800 p-1 flex items-center gap-1 cursor-pointer"
+                      title="Delete item"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span className="text-[10px]">Delete</span>
+                    </button>
+                  </div>
+                </div>
               );
             })}
           </div>
-        </div>
+        </section>
 
-        {/* Inventory Stock Limits (Superhost view) */}
-        {role === "superhost" && (
-          <div className="pt-8 border-t border-[#E5E1DB]">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
-              <div>
-                <h3 className="font-serif text-xl mb-1 flex items-center gap-2">
-                  <span>Inventory Stock Limits</span>
-                  <span className="text-[10px] uppercase tracking-widest px-2 py-0.5 bg-neutral-100 text-[#8C857D] font-mono border border-neutral-200">
-                    Live Stock
-                  </span>
+        {/* SECTION 2: RETURNABLE ITEMS & APPLIANCES */}
+        <section className="bg-white border border-[#E5E1DB] p-6 shadow-sm">
+          <div className="border-b border-[#E5E1DB] pb-4 mb-6 flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <Package className="w-5 h-5 text-[#A68966]" />
+                <h3 className="font-serif text-xl font-medium text-[#2D2926]">
+                  Page 2: Returnable Items & Shared Appliances
                 </h3>
-                <p className="text-[#8C857D] text-sm">
-                  Set the total stock for each item. Available count updates automatically as items are requested and returned.
-                </p>
               </div>
-
-              <button
-                type="button"
-                onClick={() => setIsAddingItem(!isAddingItem)}
-                className="self-start sm:self-auto px-3.5 py-2 border border-[#2D2926] text-[#2D2926] text-xs font-semibold uppercase tracking-wider hover:bg-[#2D2926] hover:text-white transition-colors flex items-center gap-1.5"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                {isAddingItem ? "Close Form" : "Add New Item"}
-              </button>
+              <p className="text-xs text-[#8C857D] mt-0.5">
+                Appliances tracked with live in-use counts, stock limits, and Floor-to-Floor Relay.
+              </p>
             </div>
+            <span className="text-xs font-medium text-[#8C857D] bg-[#FAF8F5] border border-[#E5E1DB] px-2.5 py-1">
+              {page2Items.length} Appliances
+            </span>
+          </div>
 
-            {/* Dynamic Add New Item Form */}
-            {isAddingItem && (
-              <form onSubmit={handleAddNewItem} className="mb-6 p-5 border border-[#A68966] bg-[#FAF8F5] flex flex-col md:flex-row md:items-end gap-4">
-                <div className="flex-1">
-                  <label htmlFor="new-item-name" className="block text-xs uppercase tracking-wider text-[#2D2926] font-semibold mb-1">
-                    Item Name
-                  </label>
-                  <input
-                    id="new-item-name"
-                    type="text"
-                    required
-                    placeholder="e.g. Yoga Mat, Umbrella, Coffee Mug"
-                    value={newItemName}
-                    onChange={(e) => setNewItemName(e.target.value)}
-                    className="w-full p-2.5 border border-[#E5E1DB] bg-white text-sm focus:outline-none focus:border-[#A68966]"
-                  />
-                </div>
-                <div className="w-32">
-                  <label htmlFor="new-item-stock" className="block text-xs uppercase tracking-wider text-[#2D2926] font-semibold mb-1">
-                    Total Stock
-                  </label>
-                  <input
-                    id="new-item-stock"
-                    type="number"
-                    min="1"
-                    required
-                    value={newItemLimit}
-                    onChange={(e) => setNewItemLimit(e.target.value)}
-                    className="w-full p-2.5 border border-[#E5E1DB] bg-white text-sm text-center focus:outline-none focus:border-[#A68966]"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="px-6 py-2.5 bg-[#A68966] text-white text-xs font-semibold uppercase tracking-widest hover:bg-[#8E7455] transition-colors"
+          <div className="space-y-4">
+            {page2Items.map((item) => {
+              const isAvailable = amenityStatus[item.name] !== 'out_of_service';
+              const inv = inventoryMap[item.name] || { limit: item.defaultLimit || 1, inUse: 0 };
+              const taken = inv.inUse || 0;
+              const total = inv.limit || 1;
+              const free = Math.max(0, total - taken);
+              const emoji = ITEM_EMOJI_MAP[item.name] || "📦";
+
+              return (
+                <div
+                  key={item.name}
+                  className={`p-4 border flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-colors ${
+                    isAvailable ? "bg-[#FAF8F5] border-[#E5E1DB]" : "bg-red-50/70 border-red-200"
+                  }`}
                 >
-                  Create & Sync
-                </button>
-              </form>
-            )}
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl mt-0.5">{emoji}</span>
+                    <div>
+                      <span className="font-serif text-lg text-[#2D2926] font-medium block">
+                        {item.name}
+                      </span>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        <span className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5">
+                          {taken} in rooms
+                        </span>
+                        <span className="text-[11px] font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5">
+                          {free} available
+                        </span>
+                      </div>
+                    </div>
+                  </div>
 
-            <div className="space-y-4">
-              {Object.keys(inventoryMap)
-                .filter(name => !deletedItems.includes(name) && !isCorruptOrDuplicateItem(name))
-                .map((itemName) => {
-                const invData = inventoryMap[itemName] || { limit: 1, inUse: 0 };
-                const taken = invData.inUse || 0;
-                const total = invData.limit || 1;
-                const available = Math.max(0, total - taken);
+                  <div className="flex flex-wrap items-center gap-3">
+                    {/* Stock Limit Adjustment with - and + */}
+                    <div className="flex items-center gap-1.5 bg-white border border-[#E5E1DB] px-2 py-1">
+                      <span className="text-xs text-[#8C857D] mr-1">Stock:</span>
+                      <button
+                        type="button"
+                        onClick={() => handleLimitChange(item.name, Math.max(0, total - 1))}
+                        className="w-6 h-6 flex items-center justify-center border border-[#E5E1DB] bg-[#FAF8F5] hover:bg-[#E5E1DB] text-xs font-bold cursor-pointer"
+                      >
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <input
+                        type="number"
+                        min="0"
+                        value={total}
+                        onChange={(e) => handleLimitChange(item.name, e.target.value)}
+                        className="w-12 text-center font-mono font-bold text-sm bg-transparent focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleLimitChange(item.name, total + 1)}
+                        className="w-6 h-6 flex items-center justify-center border border-[#E5E1DB] bg-[#FAF8F5] hover:bg-[#E5E1DB] text-xs font-bold cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    {/* Available / Unavailable toggle button */}
+                    <button
+                      type="button"
+                      onClick={() => toggleStatus(item.name)}
+                      className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border shrink-0 transition-colors cursor-pointer ${
+                        isAvailable
+                          ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                          : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                      }`}
+                    >
+                      {isAvailable ? "Available" : "Unavailable"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteItem(item.name)}
+                      className="p-2 border border-red-200 text-red-600 bg-red-50 hover:bg-red-600 hover:text-white transition-colors cursor-pointer"
+                      title="Delete appliance"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* SECTION 3: F&B ESSENTIALS & QUICK FOOD */}
+        <section className="bg-white border border-[#E5E1DB] p-6 shadow-sm space-y-6">
+          <div className="border-b border-[#E5E1DB] pb-4 flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <Utensils className="w-5 h-5 text-[#A68966]" />
+                <h3 className="font-serif text-xl font-medium text-[#2D2926]">
+                  Page 3: F&B Essentials & Quick Meals
+                </h3>
+              </div>
+              <p className="text-xs text-[#8C857D] mt-0.5">
+                Kitchen deposit dining utensils (₹100 deposit) and packaged quick meals.
+              </p>
+            </div>
+            <span className="text-xs font-medium text-[#8C857D] bg-[#FAF8F5] border border-[#E5E1DB] px-2.5 py-1">
+              {page3DepositItems.length + page3QuickFoodItems.length} Items
+            </span>
+          </div>
+
+          {/* Sub-section A: Kitchen Utensils (Deposit) */}
+          <div>
+            <h4 className="font-serif text-base font-medium text-[#2D2926] mb-3 flex items-center gap-2">
+              <span>Kitchen & Dining Utensils (₹100 Deposit)</span>
+            </h4>
+            <div className="space-y-3">
+              {page3DepositItems.map((item) => {
+                const isAvailable = amenityStatus[item.name] !== 'out_of_service';
+                const inv = inventoryMap[item.name] || { limit: item.defaultLimit || 10, inUse: 0 };
+                const taken = inv.inUse || 0;
+                const total = inv.limit || 10;
+                const free = Math.max(0, total - taken);
+                const emoji = ITEM_EMOJI_MAP[item.name] || "🍽️";
 
                 return (
-                  <div key={itemName} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 border border-[#E5E1DB] bg-[#F9F7F4] gap-3">
+                  <div
+                    key={item.name}
+                    className={`p-3.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                      isAvailable ? "bg-[#FAF8F5] border-[#E5E1DB]" : "bg-red-50/70 border-red-200"
+                    }`}
+                  >
                     <div className="flex items-center gap-3">
-                      <Package className="w-5 h-5 text-[#8C857D]" />
+                      <span className="text-xl">{emoji}</span>
                       <div>
-                        <span className="font-medium text-[#2D2926] block">{itemName}</span>
-                        <div className="flex items-center gap-3 mt-1 text-[11px]">
-                          <span className="text-amber-800 bg-amber-50 px-2 py-0.5 border border-amber-200 font-medium">
-                            {taken} taken
+                        <span className="font-medium text-sm text-[#2D2926] block">{item.name}</span>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-[10px] text-amber-800 bg-amber-50 px-1.5 py-0.5 border border-amber-200">
+                            {taken} in rooms
                           </span>
-                          <span className="text-emerald-800 bg-emerald-50 px-2 py-0.5 border border-emerald-200 font-medium">
-                            {available} available
+                          <span className="text-[10px] text-emerald-800 bg-emerald-50 px-1.5 py-0.5 border border-emerald-200">
+                            {free} available
+                          </span>
+                          <span className="text-[10px] text-[#A68966] font-semibold">
+                            ₹100 Deposit
                           </span>
                         </div>
                       </div>
                     </div>
-                    
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-2">
-                        <label htmlFor={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`} className="text-sm text-[#8C857D]">Total Stock:</label>
-                        <input
-                          id={`limit-${itemName.replace(/\s+/g, '-').toLowerCase()}`}
-                          type="number"
-                          min="1"
-                          value={invData.limit}
-                          onChange={(e) => handleLimitChange(itemName, e.target.value)}
-                          className="w-20 p-2 border border-[#E5E1DB] bg-white text-center focus:outline-none focus:border-[#A68966]"
-                        />
+
+                    <div className="flex items-center gap-2.5">
+                      <div className="flex items-center gap-1 bg-white border border-[#E5E1DB] px-1.5 py-0.5">
+                        <span className="text-xs text-[#8C857D] mr-1">Stock:</span>
+                        <button
+                          type="button"
+                          onClick={() => handleLimitChange(item.name, Math.max(0, total - 1))}
+                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                        >
+                          <Minus className="w-2.5 h-2.5" />
+                        </button>
+                        <span className="w-8 text-center font-mono font-bold text-xs">{total}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleLimitChange(item.name, total + 1)}
+                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                        >
+                          <Plus className="w-2.5 h-2.5" />
+                        </button>
                       </div>
 
                       <button
                         type="button"
-                        onClick={() => handleDeleteItem(itemName)}
-                        title={`Delete "${itemName}"`}
-                        className="p-2 border border-red-200 text-red-600 bg-red-50 hover:bg-red-600 hover:text-white transition-colors cursor-pointer"
+                        onClick={() => toggleStatus(item.name)}
+                        className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border shrink-0 transition-colors cursor-pointer ${
+                          isAvailable
+                            ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                            : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                        }`}
                       >
-                        <Trash2 className="w-4 h-4" />
+                        {isAvailable ? "Available" : "Unavailable"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteItem(item.name)}
+                        className="p-1.5 text-red-600 hover:text-red-800 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
                 );
               })}
             </div>
-
-            {/* Superhost PIN Change */}
-            <div className="mt-8 pt-6 border-t border-[#E5E1DB]">
-              <h4 className="font-serif text-lg mb-1 text-[#2D2926]">Superhost Access PIN</h4>
-              <p className="text-[#8C857D] text-xs mb-3">
-                Change the PIN required to unlock Superhost Portal privileges.
-              </p>
-              <div className="flex items-center gap-4">
-                <input
-                  type="text"
-                  maxLength={8}
-                  value={superhostPin}
-                  onChange={(e) => setSuperhostPin(e.target.value)}
-                  placeholder="9999"
-                  className="w-32 p-3 border border-[#E5E1DB] bg-white text-center font-mono tracking-widest text-base focus:outline-none focus:border-[#A68966]"
-                />
-                <span className="text-xs text-[#8C857D]">Current Default: 9999</span>
-              </div>
-            </div>
-
           </div>
+
+          {/* Sub-section B: Quick Food Items */}
+          <div className="pt-4 border-t border-[#E5E1DB]">
+            <h4 className="font-serif text-base font-medium text-[#2D2926] mb-3 flex items-center gap-2">
+              <span>Quick Food Items (Direct Sale)</span>
+            </h4>
+            <div className="space-y-3">
+              {page3QuickFoodItems.map((item) => {
+                const isAvailable = amenityStatus[item.name] !== 'out_of_service';
+                const inv = inventoryMap[item.name] || { limit: item.defaultLimit || 20, inUse: 0 };
+                const total = inv.limit || 20;
+                const emoji = ITEM_EMOJI_MAP[item.name] || "🍜";
+
+                return (
+                  <div
+                    key={item.name}
+                    className={`p-3.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                      isAvailable ? "bg-[#FAF8F5] border-[#E5E1DB]" : "bg-red-50/70 border-red-200"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl">{emoji}</span>
+                      <div>
+                        <span className="font-medium text-sm text-[#2D2926] block">{item.name}</span>
+                        {item.badge && (
+                          <span className="text-[10px] text-[#A68966] font-semibold mt-0.5 block">
+                            Price: {item.badge}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2.5">
+                      <div className="flex items-center gap-1 bg-white border border-[#E5E1DB] px-1.5 py-0.5">
+                        <span className="text-xs text-[#8C857D] mr-1">Stock:</span>
+                        <button
+                          type="button"
+                          onClick={() => handleLimitChange(item.name, Math.max(0, total - 1))}
+                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                        >
+                          <Minus className="w-2.5 h-2.5" />
+                        </button>
+                        <span className="w-8 text-center font-mono font-bold text-xs">{total}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleLimitChange(item.name, total + 1)}
+                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                        >
+                          <Plus className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => toggleStatus(item.name)}
+                        className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border shrink-0 transition-colors cursor-pointer ${
+                          isAvailable
+                            ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                            : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                        }`}
+                      >
+                        {isAvailable ? "Available" : "Unavailable"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteItem(item.name)}
+                        className="p-1.5 text-red-600 hover:text-red-800 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </section>
+
+        {/* SECTION 4: CUSTOM ITEMS (If any added) */}
+        {customItems.length > 0 && (
+          <section className="bg-white border border-[#E5E1DB] p-6 shadow-sm">
+            <h3 className="font-serif text-xl font-medium text-[#2D2926] mb-4">
+              Custom Added Items
+            </h3>
+            <div className="space-y-3">
+              {customItems.map((itemName) => {
+                const isAvailable = amenityStatus[itemName] !== 'out_of_service';
+                const inv = inventoryMap[itemName] || { limit: 1, inUse: 0 };
+                const total = inv.limit || 1;
+
+                return (
+                  <div
+                    key={itemName}
+                    className={`p-3.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                      isAvailable ? "bg-[#FAF8F5] border-[#E5E1DB]" : "bg-red-50/70 border-red-200"
+                    }`}
+                  >
+                    <span className="font-medium text-sm text-[#2D2926]">{itemName}</span>
+
+                    <div className="flex items-center gap-2.5">
+                      <div className="flex items-center gap-1 bg-white border border-[#E5E1DB] px-1.5 py-0.5">
+                        <span className="text-xs text-[#8C857D] mr-1">Stock:</span>
+                        <button
+                          type="button"
+                          onClick={() => handleLimitChange(itemName, Math.max(0, total - 1))}
+                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                        >
+                          <Minus className="w-2.5 h-2.5" />
+                        </button>
+                        <span className="w-8 text-center font-mono font-bold text-xs">{total}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleLimitChange(itemName, total + 1)}
+                          className="w-5 h-5 flex items-center justify-center border border-[#E5E1DB] text-xs font-bold cursor-pointer"
+                        >
+                          <Plus className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => toggleStatus(itemName)}
+                        className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border shrink-0 transition-colors cursor-pointer ${
+                          isAvailable
+                            ? "bg-green-700 text-white border-green-800 hover:bg-green-800"
+                            : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+                        }`}
+                      >
+                        {isAvailable ? "Available" : "Unavailable"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteItem(itemName)}
+                        className="p-1.5 text-red-600 hover:text-red-800 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Superhost PIN Section (Superhost only) */}
+        {role === "superhost" && (
+          <section className="bg-white border border-[#E5E1DB] p-6 shadow-sm">
+            <h4 className="font-serif text-lg text-[#2D2926] mb-1">Superhost Access PIN</h4>
+            <p className="text-xs text-[#8C857D] mb-3">
+              Change the PIN required to access the Superhost Portal.
+            </p>
+            <div className="flex items-center gap-3">
+              <input
+                type="text"
+                maxLength={8}
+                value={superhostPin}
+                onChange={(e) => setSuperhostPin(e.target.value)}
+                placeholder="9999"
+                className="w-28 p-2.5 border border-[#E5E1DB] bg-white text-center font-mono tracking-widest text-sm focus:outline-none focus:border-[#A68966]"
+              />
+              <span className="text-xs text-[#8C857D]">Default PIN: 9999</span>
+            </div>
+          </section>
         )}
 
         {/* Save Settings Footer */}
-        <div className="pt-6 border-t border-[#E5E1DB] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div className="bg-white border border-[#E5E1DB] p-6 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
             <p className="text-xs text-[#8C857D]">
-              Changes are saved across all staff dashboards and guest mobile devices.
+              Changes are saved live to the database and synced instantly to all guest rooms and staff devices.
             </p>
             {lastSavedMsg && (
-              <p className="text-xs text-green-700 font-medium mt-1.5 flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" />
-                <span>{lastSavedMsg} — <strong>Ready & safe to exit</strong></span>
+              <p className="text-xs text-green-700 font-medium mt-1 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-green-600 shrink-0" />
+                <span>{lastSavedMsg}</span>
               </p>
             )}
           </div>
+
           <button
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="px-8 py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors disabled:opacity-50 flex items-center gap-2 shrink-0 cursor-pointer shadow-xs"
+            className="px-8 py-3.5 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors disabled:opacity-50 flex items-center gap-2 shrink-0 cursor-pointer shadow-xs"
           >
             {saving ? (
               <>
@@ -840,7 +1111,7 @@ export default function StaffSettings() {
             ) : (
               <>
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Save Settings</span>
+                <span>Save All Settings</span>
               </>
             )}
           </button>

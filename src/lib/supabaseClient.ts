@@ -46,15 +46,34 @@ export async function fetchLiveRequests(): Promise<RoomRequest[]> {
           row.room_id !== "SETTINGS" && 
           !String(row.id || "").startsWith("system-")
         );
-        return activeRows.map((row: any): RoomRequest => ({
-          id: row.id,
-          roomId: String(row.room_id),
-          qrCodeHash: String(row.room_id),
-          items: Array.isArray(row.items) ? row.items : [],
-          customMessage: row.custom_message || "",
-          status: row.status === "completed" ? "completed" : "pending",
-          createdAt: Number(row.created_at) || Date.now()
-        }));
+        return activeRows.map((row: any): RoomRequest => {
+          let isWaitlist = !!row.is_waitlist;
+          let waitlistForItem = row.waitlist_for_item || undefined;
+          let queuePosition = typeof row.queue_position === "number" ? row.queue_position : undefined;
+
+          const msg = String(row.custom_message || "");
+          if (!isWaitlist && msg.startsWith("[WAITLIST:")) {
+            isWaitlist = true;
+            const match = msg.match(/\[WAITLIST:\s*([^\]#]+)(?:#(\d+))?\]/i);
+            if (match) {
+              waitlistForItem = match[1]?.trim();
+              if (match[2]) queuePosition = parseInt(match[2], 10);
+            }
+          }
+
+          return {
+            id: row.id,
+            roomId: String(row.room_id),
+            qrCodeHash: String(row.room_id),
+            items: Array.isArray(row.items) ? row.items : [],
+            customMessage: row.custom_message || "",
+            status: row.status === "completed" ? "completed" : "pending",
+            createdAt: Number(row.created_at) || Date.now(),
+            isWaitlist,
+            waitlistForItem,
+            queuePosition
+          };
+        });
       }
     } catch (err) {
       console.warn("[CLIENT SUPABASE] Direct fetch requests fallback to API:", err);
@@ -97,7 +116,9 @@ export async function fetchLiveBorrowed(): Promise<BorrowedItem[]> {
           itemName: row.item_name,
           status: row.status === "returned" ? "returned" : "borrowed",
           createdAt: Number(row.created_at) || Date.now(),
-          returnedAt: row.returned_at ? new Date(row.returned_at).getTime() : undefined
+          returnedAt: row.returned_at ? new Date(row.returned_at).getTime() : undefined,
+          relayedFromRoom: row.relayed_from_room || undefined,
+          relayCount: typeof row.relay_count === "number" ? row.relay_count : undefined
         }));
       }
     } catch (err) {
@@ -238,17 +259,34 @@ export async function saveLiveBorrowed(item: BorrowedItem): Promise<boolean> {
 
   if (sb) {
     try {
-      const payload = {
+      const payload: any = {
         id: item.id,
         room_id: String(item.roomId),
         item_name: item.itemName,
         status: item.status,
         created_at: item.createdAt || Date.now(),
-        returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null
+        returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null,
+        relayed_from_room: item.relayedFromRoom || null,
+        relay_count: item.relayCount || 0
       };
-      const { error } = await sb
+      let { error } = await sb
         .from("borrowed_items")
         .upsert(payload, { onConflict: "id" });
+      
+      if (error && (error.message?.includes("column") || error.code === "PGRST204" || error.code === "42703")) {
+        console.warn("[CLIENT SUPABASE] Borrowed table lacks relay columns, falling back to base columns");
+        const basePayload = {
+          id: item.id,
+          room_id: String(item.roomId),
+          item_name: item.itemName,
+          status: item.status,
+          created_at: item.createdAt || Date.now(),
+          returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null
+        };
+        const retry = await sb.from("borrowed_items").upsert(basePayload, { onConflict: "id" });
+        error = retry.error;
+      }
+
       if (!error) success = true;
     } catch (err) {
       console.warn("[CLIENT SUPABASE] Save borrowed error:", err);
@@ -259,6 +297,76 @@ export async function saveLiveBorrowed(item: BorrowedItem): Promise<boolean> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(item)
+  }).catch(() => {});
+
+  return success;
+}
+
+/**
+ * Floor-to-Floor Relay: Atomically hands off an appliance from Room A to Room B directly
+ */
+export async function relayLiveBorrowedItem(
+  sourceBorrowedId: string,
+  sourceRoomId: string,
+  targetRoomId: string,
+  itemName: string,
+  targetRequestId?: string,
+  currentRelayCount?: number
+): Promise<boolean> {
+  let success = false;
+  const sb = getClientSupabase();
+  const newRelayCount = (currentRelayCount || 0) + 1;
+  const newBorrowedId = `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+
+  if (sb) {
+    try {
+      // 1. Mark source item returned
+      if (sourceBorrowedId) {
+        await sb
+          .from("borrowed_items")
+          .update({ status: "returned", returned_at: new Date().toISOString() })
+          .eq("id", sourceBorrowedId);
+      }
+
+      // 2. Insert new borrowed item for target room
+      const newBorrowed: BorrowedItem = {
+        id: newBorrowedId,
+        roomId: String(targetRoomId),
+        itemName,
+        status: "borrowed",
+        createdAt: Date.now(),
+        requestId: targetRequestId,
+        relayedFromRoom: String(sourceRoomId),
+        relayCount: newRelayCount
+      };
+      await saveLiveBorrowed(newBorrowed);
+
+      // 3. Complete target request if provided
+      if (targetRequestId) {
+        await sb
+          .from("guest_requests")
+          .update({ status: "completed", updated_at: new Date().toISOString() })
+          .eq("id", targetRequestId);
+      }
+
+      success = true;
+    } catch (err) {
+      console.warn("[CLIENT SUPABASE] Relay borrowed error:", err);
+    }
+  }
+
+  // Also notify server API for relay
+  fetch("/api/borrowed/relay", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sourceBorrowedId,
+      sourceRoomId,
+      targetRoomId,
+      itemName,
+      targetRequestId,
+      currentRelayCount
+    })
   }).catch(() => {});
 
   return success;

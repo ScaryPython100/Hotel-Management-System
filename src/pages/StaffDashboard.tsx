@@ -8,6 +8,7 @@ import {
   deleteLiveBorrowed,
   dismissLiveRequest,
   saveLiveBorrowed,
+  relayLiveBorrowedItem,
   clearAllLiveRequests,
   syncInventoryAvailability,
   getClientSupabase,
@@ -20,14 +21,12 @@ import {
   Trash2,
   AlertCircle,
   Package,
-  TableProperties,
   LayoutGrid,
   RefreshCw
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import RoomGroupCard from "../components/staff/RoomGroupCard";
 import BorrowedItemsSection from "../components/staff/BorrowedItemsSection";
-import RequestsTableView from "../components/staff/RequestsTableView";
 
 function getDismissedRequestIds(): string[] {
   try {
@@ -116,9 +115,7 @@ export default function StaffDashboard() {
     return [];
   });
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<"cards" | "table" | "borrowed">("table");
-  const [tableSearch, setTableSearch] = useState("");
-  const [tableFilter, setTableFilter] = useState<"all" | "pending" | "completed">("all");
+  const [activeTab, setActiveTab] = useState<"cards" | "borrowed">("cards");
   const [isManualSyncing, setIsManualSyncing] = useState(false);
 
   useEffect(() => {
@@ -445,6 +442,65 @@ export default function StaffDashboard() {
     syncInventoryAvailability(remaining, requests).catch(() => {});
   };
 
+  const handleRelayBorrowedItem = async (
+    sourceBorrowedId: string,
+    sourceRoom: string,
+    targetRoom: string,
+    itemName: string,
+    targetRequestId?: string,
+    currentRelayCount?: number
+  ) => {
+    const cleanItemName = normalizeReturnableName(itemName);
+    const newRelayCount = (currentRelayCount || 0) + 1;
+    const now = Date.now();
+
+    // 1. Mark source item returned and add new borrowed record for target room
+    const newBorrowedItem: BorrowedItem = {
+      id: `borrowed-${now}-${Math.random().toString(36).substr(2, 6)}`,
+      roomId: targetRoom,
+      itemName: cleanItemName,
+      status: "borrowed",
+      createdAt: now,
+      requestId: targetRequestId,
+      relayedFromRoom: sourceRoom,
+      relayCount: newRelayCount
+    };
+
+    const updatedBorrowed = borrowedItems.map(b => 
+      b.id === sourceBorrowedId 
+        ? { ...b, status: "returned" as const, returnedAt: now } 
+        : b
+    );
+    const nextBorrowed = [newBorrowedItem, ...updatedBorrowed];
+    setBorrowedItems(nextBorrowed);
+    try {
+      localStorage.setItem("hues_stay_borrowed", JSON.stringify(nextBorrowed));
+    } catch (e) {}
+
+    // 2. Mark the waitlist request as completed if targetRequestId exists
+    let updatedRequests = requests;
+    if (targetRequestId) {
+      updatedRequests = requests.map(r => 
+        r.id === targetRequestId 
+          ? { ...r, status: "completed" as const } 
+          : r
+      );
+      setRequests(updatedRequests);
+      try {
+        localStorage.setItem("hues_stay_requests", JSON.stringify(updatedRequests));
+      } catch (e) {}
+    }
+
+    toast.success(
+      `Floor-to-Floor Relay complete! ${cleanItemName} handed from Room ${sourceRoom} directly to Room ${targetRoom}.`,
+      { duration: 6000 }
+    );
+
+    // Call live relay function (syncs Supabase and server API)
+    await relayLiveBorrowedItem(sourceBorrowedId, sourceRoom, targetRoom, cleanItemName, targetRequestId, currentRelayCount);
+    syncInventoryAvailability(nextBorrowed, updatedRequests).catch(() => {});
+  };
+
   const pendingRequests = useMemo(() => requests.filter(r => r.status === "pending"), [requests]);
   const completedRequests = useMemo(() => requests.filter(r => r.status === "completed"), [requests]);
 
@@ -477,26 +533,6 @@ export default function StaffDashboard() {
     }, {} as Record<string, RoomRequest[]>);
   }, [completedRequests]);
 
-  const filteredTableRequests = useMemo(() => {
-    const query = tableSearch.toLowerCase().trim();
-    return requests.filter(req => {
-      if (tableFilter === "pending" && req.status !== "pending") return false;
-      if (tableFilter === "completed" && req.status !== "completed") return false;
-
-      if (query) {
-        const roomMatch = (req.roomId || "").toLowerCase().includes(query);
-        if (roomMatch) return true;
-        const itemsMatch = Array.isArray(req.items)
-          ? req.items.some((i: any) => String(i).toLowerCase().includes(query))
-          : String(req.items || "").toLowerCase().includes(query);
-        if (itemsMatch) return true;
-        return (req.customMessage || "").toLowerCase().includes(query);
-      }
-
-      return true;
-    });
-  }, [requests, tableFilter, tableSearch]);
-
   return (
     <>
       <Toaster position="top-right" />
@@ -508,22 +544,12 @@ export default function StaffDashboard() {
                 <h2 className="text-4xl font-serif italic text-[#2D2926]">Staff Requests Dashboard</h2>
               </div>
               <p className="text-sm text-[#8C857D] italic">
-                Real-time room requests, structured data records, and borrowed inventory.
+                Real-time room requests, structured cards, and borrowed inventory.
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex border border-[#E5E1DB] bg-white p-1 rounded-none shadow-sm">
-                <button
-                  onClick={() => setActiveTab("table")}
-                  className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
-                    activeTab === "table" ? "bg-[#2D2926] text-white" : "text-[#8C857D] hover:text-[#2D2926]"
-                  }`}
-                  title="Structured Columns & Rows Table"
-                >
-                  <TableProperties className="w-3.5 h-3.5" />
-                  Table View {requests.length > 0 && `(${requests.length})`}
-                </button>
                 <button
                   onClick={() => setActiveTab("cards")}
                   className={`px-5 py-2 text-xs font-medium tracking-widest uppercase transition-colors flex items-center gap-2 ${
@@ -575,23 +601,6 @@ export default function StaffDashboard() {
             </div>
           ) : (
             <div className="space-y-8">
-              {activeTab === "table" && (
-                <RequestsTableView
-                  requests={requests}
-                  filteredTableRequests={filteredTableRequests}
-                  pendingCount={pendingRequests.length}
-                  completedCount={completedRequests.length}
-                  hasBorrowedItems={borrowedItems.length > 0}
-                  tableSearch={tableSearch}
-                  onTableSearchChange={setTableSearch}
-                  tableFilter={tableFilter}
-                  onTableFilterChange={setTableFilter}
-                  onToggleStatus={handleToggleStatus}
-                  onDelete={handleDelete}
-                  onClearCompleted={handleClearCompleted}
-                  onClearAllDatabase={handleClearAllDatabaseRequests}
-                />
-              )}
 
               {activeTab === "cards" && (
                 <>
@@ -658,8 +667,10 @@ export default function StaffDashboard() {
               {activeTab === "borrowed" && (
                 <BorrowedItemsSection
                   activeBorrowed={activeBorrowed}
+                  pendingRequests={pendingRequests}
                   onMarkReturned={handleMarkReturned}
                   onDeleteBorrowed={handleDeleteBorrowed}
+                  onRelayItem={handleRelayBorrowedItem}
                 />
               )}
             </div>

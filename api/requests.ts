@@ -28,6 +28,12 @@ const TARGET_AUTO_ITEMS = [
   "Kettle",
   "Hair Dryer",
   "Laptop Table",
+  "Hot Pack",
+  "Set of Plates",
+  "Set of Cups/Bowls",
+  "Set of Glasses",
+  "Empty Water Bottle",
+  "Cooking Oil Dispenser",
   "Leg Massager (Paid)",
   "Glasses (Set of 2)",
   "USB 3.0 Cable + Adaptor",
@@ -39,6 +45,12 @@ const DEFAULT_LIMITS: Record<string, number> = {
   "Kettle": 5,
   "Hair Dryer": 2,
   "Laptop Table": 2,
+  "Hot Pack": 2,
+  "Set of Plates": 10,
+  "Set of Cups/Bowls": 10,
+  "Set of Glasses": 10,
+  "Empty Water Bottle": 5,
+  "Cooking Oil Dispenser": 5,
   "Leg Massager (Paid)": 1,
   "Glasses (Set of 2)": 10,
   "USB 3.0 Cable + Adaptor": 2,
@@ -49,11 +61,16 @@ function normalizeItemName(name: string): string {
   if (!name) return "";
   const lower = name.toLowerCase().trim();
   if (lower.includes("iron")) return "Iron Box";
-  if (lower.includes("kettle")) return "Kettle";
+  if (lower.includes("kettle") || lower.includes("teakettle")) return "Kettle";
   if (lower.includes("hair") && lower.includes("dryer")) return "Hair Dryer";
   if (lower.includes("laptop")) return "Laptop Table";
+  if (lower.includes("hot pack") || lower.includes("pack")) return "Hot Pack";
+  if (lower.includes("plate")) return "Set of Plates";
+  if (lower.includes("cup") || lower.includes("bowl")) return "Set of Cups/Bowls";
+  if (lower.includes("glass")) return "Set of Glasses";
+  if (lower.includes("bottle") && lower.includes("empty")) return "Empty Water Bottle";
+  if (lower.includes("dispenser") || lower.includes("oil")) return "Cooking Oil Dispenser";
   if (lower.includes("massager")) return "Leg Massager (Paid)";
-  if (lower.includes("glass")) return "Glasses (Set of 2)";
   if (lower.includes("usb") || lower.includes("cable") || lower.includes("adaptor")) return "USB 3.0 Cable + Adaptor";
   if (lower.includes("infrared") || lower.includes("heat therapy")) return "Infrared Heat Therapy Lamp (Paid)";
   return name.trim();
@@ -221,14 +238,31 @@ export default async function handler(req: any, res: any) {
       const data = await response.json();
       const mapped = (Array.isArray(data) ? data : [])
         .filter((r: any) => r.room_id !== "SETTINGS" && !String(r.id || "").startsWith("system-"))
-        .map((r: any) => ({
-          id: r.id,
-          roomId: r.room_id,
-          items: Array.isArray(r.items) ? r.items : [],
-          customMessage: r.custom_message || "",
-          status: r.status || "pending",
-          createdAt: Number(r.created_at) || Date.now()
-        }));
+        .map((r: any) => {
+          let isWaitlist = !!r.is_waitlist;
+          let waitlistForItem = r.waitlist_for_item || undefined;
+          let queuePosition = typeof r.queue_position === "number" ? r.queue_position : undefined;
+          const msg = String(r.custom_message || "");
+          if (!isWaitlist && msg.startsWith("[WAITLIST:")) {
+            isWaitlist = true;
+            const match = msg.match(/\[WAITLIST:\s*([^\]#]+)(?:#(\d+))?\]/i);
+            if (match) {
+              waitlistForItem = match[1]?.trim();
+              if (match[2]) queuePosition = parseInt(match[2], 10);
+            }
+          }
+          return {
+            id: r.id,
+            roomId: r.room_id,
+            items: Array.isArray(r.items) ? r.items : [],
+            customMessage: r.custom_message || "",
+            status: r.status || "pending",
+            createdAt: Number(r.created_at) || Date.now(),
+            isWaitlist,
+            waitlistForItem,
+            queuePosition
+          };
+        });
       return res.status(200).json({ success: true, requests: mapped, source: "supabase" });
     } catch (e: any) {
       return res.status(200).json({ success: true, requests: [], error: e?.message });
@@ -237,21 +271,24 @@ export default async function handler(req: any, res: any) {
 
   // POST new request to Supabase
   if (req.method === 'POST') {
-    const { roomId, roomNumber, room_id, items, customMessage, status, createdAt, id: providedId } = req.body || {};
+    const { roomId, roomNumber, room_id, items, customMessage, status, createdAt, id: providedId, isWaitlist, waitlistForItem, queuePosition } = req.body || {};
     const resolvedRoomId = String(roomId || roomNumber || room_id || "Unknown");
-    const newReq = {
+    const newReq: any = {
       id: providedId || `srv-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
       room_id: resolvedRoomId,
       items: Array.isArray(items) ? items : [],
       custom_message: customMessage || "",
       status: status || "pending",
       created_at: createdAt || Date.now(),
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
+      is_waitlist: Boolean(isWaitlist),
+      waitlist_for_item: waitlistForItem || null,
+      queue_position: typeof queuePosition === "number" ? queuePosition : null
     };
 
     if (supabaseUrl && supabaseKey) {
       try {
-        await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
+        const resp = await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
           method: "POST",
           headers: {
             "apikey": supabaseKey,
@@ -261,6 +298,32 @@ export default async function handler(req: any, res: any) {
           },
           body: JSON.stringify(newReq)
         });
+        if (!resp.ok) {
+          // Fallback without waitlist columns if schema does not have them yet
+          let fallbackMessage = customMessage || "";
+          if (isWaitlist && waitlistForItem) {
+            fallbackMessage = `[WAITLIST: ${waitlistForItem}#${queuePosition || 1}] ${fallbackMessage}`.trim();
+          }
+          const baseReq = {
+            id: newReq.id,
+            room_id: newReq.room_id,
+            items: newReq.items,
+            custom_message: fallbackMessage,
+            status: newReq.status,
+            created_at: newReq.created_at,
+            updated_at: newReq.updated_at
+          };
+          await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
+            method: "POST",
+            headers: {
+              "apikey": supabaseKey,
+              "Authorization": `Bearer ${supabaseKey}`,
+              "Content-Type": "application/json",
+              "Prefer": "resolution=merge-duplicates"
+            },
+            body: JSON.stringify(baseReq)
+          });
+        }
       } catch (e) {}
     }
 
@@ -286,18 +349,30 @@ export default async function handler(req: any, res: any) {
           const timestamp = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
           const dashboardUrl = process.env.APP_URL ? `${process.env.APP_URL.replace(/\/$/, '')}/staff` : "https://huesstayluxuryrooms.vercel.app/staff";
 
-          const plainText = `🛎️ NEW GUEST REQUEST - ROOM ${roomIdStr}\n` +
-            `==========================================\n\n` +
-            `Room: Room ${roomIdStr}\n` +
-            `Time: ${timestamp}\n\n` +
-            `Items Requested:\n` +
-            `${newReq.items && newReq.items.length > 0 ? newReq.items.map((i: string) => `  • ${i}`).join("\n") : "  (No specific items)"}\n\n` +
+          const isWaitlistReservation = Boolean(isWaitlist);
+          const emailSubject = isWaitlistReservation
+            ? `⏳ Waitlist Reservation (Queue #${queuePosition || 1}): Room ${roomIdStr}`
+            : `🛎️ New Request: Room ${roomIdStr}`;
+
+          const plainText = (isWaitlistReservation
+            ? `⏳ SMART WAITLIST RESERVATION (QUEUE #${queuePosition || 1}) - ROOM ${roomIdStr}\n` +
+              `============================================================\n\n` +
+              `Room: Room ${roomIdStr}\n` +
+              `Time: ${timestamp}\n\n` +
+              `Scarce Item Reserved: ${waitlistForItem || (newReq.items && newReq.items[0]) || "Appliance"}\n` +
+              `Status: In line for Floor-to-Floor Relay as soon as freed from current room\n\n`
+            : `🛎️ NEW GUEST REQUEST - ROOM ${roomIdStr}\n` +
+              `==========================================\n\n` +
+              `Room: Room ${roomIdStr}\n` +
+              `Time: ${timestamp}\n\n` +
+              `Items Requested:\n` +
+              `${newReq.items && newReq.items.length > 0 ? newReq.items.map((i: string) => `  • ${i}`).join("\n") : "  (No specific items)"}\n\n`) +
             (newReq.custom_message ? `Guest Note:\n  "${newReq.custom_message}"\n\n` : "") +
             `Open Staff Dashboard to attend to this request.\n` +
             `${dashboardUrl}\n\n` +
             `---\nHues Stay Automated Concierge System`;
 
-          const htmlContent = `<!DOCTYPE html><html><body style="font-family:sans-serif;color:#2D2926;background:#F9F7F4;padding:24px;"><div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #E5E1DB;padding:28px;"><h2 style="margin:0 0 16px;color:#2D2926;font-size:20px;">🛎️ New Request: Room ${roomIdStr}</h2><p style="margin:0 0 12px;color:#59534C;"><strong>Items Requested:</strong></p><ul style="margin:0 0 16px;padding-left:20px;color:#2D2926;">${newReq.items && newReq.items.length > 0 ? newReq.items.map((i: string) => `<li>${i}</li>`).join("") : "<li>No specific items</li>"}</ul>${newReq.custom_message ? `<p style="margin:0 0 16px;color:#59534C;"><strong>Note:</strong> ${newReq.custom_message}</p>` : ""}<div style="margin-top:24px;"><a href="${dashboardUrl}" style="background:#2D2926;color:#ffffff;text-decoration:none;padding:10px 20px;font-size:13px;font-weight:bold;letter-spacing:1px;display:inline-block;">OPEN STAFF DASHBOARD</a></div></div></body></html>`;
+          const htmlContent = `<!DOCTYPE html><html><body style="font-family:sans-serif;color:#2D2926;background:#F9F7F4;padding:24px;"><div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #E5E1DB;padding:28px;"><h2 style="margin:0 0 16px;color:#2D2926;font-size:20px;">${isWaitlistReservation ? `⏳ Waitlist Reservation (Queue #${queuePosition || 1}): Room ${roomIdStr}` : `🛎️ New Request: Room ${roomIdStr}`}</h2>${isWaitlistReservation ? `<p style="margin:0 0 8px;padding:8px 12px;background:#FEF3C7;color:#92400E;font-size:12px;font-weight:bold;">⚡ FLOOR-TO-FLOOR RELAY PENDING: Item currently in use in another room.</p>` : ""}<p style="margin:0 0 12px;color:#59534C;"><strong>${isWaitlistReservation ? "Reserved Appliance:" : "Items Requested:"}</strong></p><ul style="margin:0 0 16px;padding-left:20px;color:#2D2926;">${newReq.items && newReq.items.length > 0 ? newReq.items.map((i: string) => `<li>${i}</li>`).join("") : "<li>No specific items</li>"}</ul>${newReq.custom_message ? `<p style="margin:0 0 16px;color:#59534C;"><strong>Note:</strong> ${newReq.custom_message}</p>` : ""}<div style="margin-top:24px;"><a href="${dashboardUrl}" style="background:#2D2926;color:#ffffff;text-decoration:none;padding:10px 20px;font-size:13px;font-weight:bold;letter-spacing:1px;display:inline-block;">OPEN STAFF DASHBOARD</a></div></div></body></html>`;
 
           try {
             const emailPromise = fetch("https://api.resend.com/emails", {
@@ -310,7 +385,7 @@ export default async function handler(req: any, res: any) {
                 from,
                 to: [recipient],
                 reply_to: replyTo,
-                subject: `🛎️ New Request: Room ${roomIdStr}`,
+                subject: emailSubject,
                 text: plainText,
                 html: htmlContent
               })

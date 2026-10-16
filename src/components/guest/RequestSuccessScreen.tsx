@@ -1,11 +1,38 @@
 import React from "react";
-import { Check, Trash2 } from "lucide-react";
+import { Check, Clock, Trash2 } from "lucide-react";
 
 export const ITEM_EMOJI_MAP: Record<string, string> = {
+  // Page 1: Daily Services
+  "Extra Person (w/ or w/o Mattress) (₹500/-)": "🛏️",
+  "Shower Gel Refill": "🧴",
+  "Shampoo Refill": "🧴",
+  "Hand Wash Refill": "🧼",
+  "First Aid Kit": "🩹",
+  "Housekeeping Service (Only Between 10 A.M. and 4 P.M.)": "🧹",
+  "Toothpaste": "🪥",
+  "Toothbrush": "🪥",
+
+  // Page 2: Returnable Items
   "Iron Box": "👕",
   "Kettle": "🫖",
   "Hair Dryer": "💇‍♀️",
   "Laptop Table": "💻",
+  "Hot Pack": "🌡️",
+
+  // Page 3: F&B Essentials & Quick Food
+  "Set of Plates": "🍽️",
+  "Set of Cups/Bowls": "🥣",
+  "Set of Glasses": "🥛",
+  "Empty Water Bottle": "🍶",
+  "Cooking Oil Dispenser": "🫒",
+  "Maggi (₹20)": "🍜",
+  "Eggs (₹10)": "🥚",
+  "Coffee Sachet (₹5 per sachet)": "☕",
+  "Soft Drinks (₹50)": "🥤",
+  "Toned Milk 200/500 mL (₹30)": "🥛",
+  "Masala Box (₹50)": "🧂",
+
+  // Legacy fallback
   "Leg Massager (Paid)": "🦵",
   "Glasses (Set of 2)": "🥃",
   "USB 3.0 Cable + Adaptor": "🔌",
@@ -17,28 +44,55 @@ interface RequestSuccessScreenProps {
   selectedItems: string[];
   onMakeAnotherRequest: () => void;
   onCancelRequest: () => void;
+  isWaitlist?: boolean;
+  waitlistForItem?: string;
+  queuePosition?: number;
 }
 
 export default function RequestSuccessScreen({
   roomNumber,
   selectedItems,
   onMakeAnotherRequest,
-  onCancelRequest
+  onCancelRequest,
+  isWaitlist = false,
+  waitlistForItem,
+  queuePosition = 1
 }: RequestSuccessScreenProps) {
   return (
     <div className="min-h-screen bg-[#F9F7F4] flex flex-col items-center justify-center p-6 text-center text-[#2D2926] font-sans">
-      <div className="w-20 h-20 bg-[#F2EFE9] text-[#A68966] rounded-full flex items-center justify-center mb-6 border border-[#E5E1DB] shadow-xs">
-        <Check className="w-10 h-10 stroke-[2.5]" />
+      <div className={`w-20 h-20 ${isWaitlist ? "bg-amber-50 text-amber-600 border-amber-200" : "bg-[#F2EFE9] text-[#A68966] border-[#E5E1DB]"} rounded-full flex items-center justify-center mb-6 border shadow-xs`}>
+        {isWaitlist ? (
+          <Clock className="w-10 h-10 stroke-[2.2]" />
+        ) : (
+          <Check className="w-10 h-10 stroke-[2.5]" />
+        )}
       </div>
-      <h2 className="text-3xl font-serif italic mb-2">Request Received</h2>
+
+      <h2 className="text-3xl font-serif italic mb-2">
+        {isWaitlist ? "Reserved! You are in line" : "Request Received"}
+      </h2>
       <p className="text-[#8C857D] mb-6 max-w-md text-sm">
-        Our housekeeping and guest service team has been notified and will attend to Room {roomNumber} promptly.
+        {isWaitlist
+          ? `Reserved! You are #${queuePosition} in line for the ${waitlistForItem || selectedItems[0] || "item"}. Housekeeping will bring it straight to Room ${roomNumber} as soon as it frees up.`
+          : `Our housekeeping and guest service team has been notified and will attend to Room ${roomNumber} promptly.`}
       </p>
+
+      {isWaitlist && (
+        <div className="bg-amber-50/80 border border-amber-200/90 p-4 mb-6 max-w-sm w-full text-left">
+          <p className="text-xs font-bold text-amber-900 flex items-center gap-1.5 mb-1">
+            <Clock className="w-3.5 h-3.5 text-amber-700" />
+            Floor-to-Floor Smart Relay
+          </p>
+          <p className="text-[11px] text-amber-800 leading-relaxed">
+            The {waitlistForItem || "appliance"} is currently in use. When the other guest finishes, housekeeping is notified to hand it over directly to Room {roomNumber}.
+          </p>
+        </div>
+      )}
 
       {selectedItems.length > 0 && (
         <div className="bg-white border border-[#E5E1DB] p-4 mb-8 max-w-sm w-full text-left shadow-2xs">
           <span className="text-[10px] uppercase tracking-widest text-[#8C857D] font-mono block mb-2 font-semibold">
-            Requested Items
+            {isWaitlist ? "Reserved Items" : "Requested Items"}
           </span>
           <ul className="space-y-1.5 text-sm text-[#2D2926]">
             {selectedItems.map(item => {
@@ -50,8 +104,8 @@ export default function RequestSuccessScreen({
                     {emoji && <span className="mr-1.5">{emoji}</span>}
                     {item}
                   </span>
-                  <span className="font-mono text-xs text-[#A68966] bg-[#FAF8F5] px-2 py-0.5 border border-[#EBE7E1] rounded-xs">
-                    Requested
+                  <span className={`font-mono text-xs ${isWaitlist ? "text-amber-700 bg-amber-50 border-amber-200" : "text-[#A68966] bg-[#FAF8F5] border-[#EBE7E1]"} px-2 py-0.5 border rounded-xs`}>
+                    {isWaitlist ? `Queue #${queuePosition}` : "Requested"}
                   </span>
                 </li>
               );

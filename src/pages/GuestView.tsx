@@ -19,10 +19,36 @@ import {
   TARGET_AUTO_UNAVAILABLE_ITEMS,
   DEFAULT_INVENTORY_LIMITS,
   normalizeReturnableName,
-  isTargetAutoUnavailableItem
+  isTargetAutoUnavailableItem,
+  isReturnableItem,
+  AmenitySection,
+  PAGE_1_DAILY_ITEMS,
+  PAGE_2_RETURNABLE_ITEMS,
+  PAGE_3_FNB_DEPOSIT_ITEMS,
+  PAGE_3_QUICK_FOOD_ITEMS,
+  extractBaseItemName
 } from "../types";
 import toast, { Toaster } from "react-hot-toast";
-import { Loader2, Info } from "lucide-react";
+import { 
+  Loader2, 
+  Info, 
+  Copy, 
+  Check, 
+  QrCode, 
+  X, 
+  Wifi, 
+  Phone, 
+  Droplets, 
+  Utensils, 
+  Clock, 
+  ExternalLink, 
+  Maximize2,
+  Calendar,
+  LogOut,
+  CheckCircle2,
+  AlertTriangle
+} from "lucide-react";
+import upiQrImage from "../assets/huesstay-upi-qr.jpg";
 import RoomSelectorScreen from "../components/guest/RoomSelectorScreen";
 import RequestSuccessScreen from "../components/guest/RequestSuccessScreen";
 import GuestDetailsForm from "../components/guest/GuestDetailsForm";
@@ -84,6 +110,9 @@ export default function GuestView() {
       return null;
     }
   });
+
+  const [waitlistCounts, setWaitlistCounts] = useState<Record<string, number>>({});
+  const [submittedWaitlistInfo, setSubmittedWaitlistInfo] = useState<{ isWaitlist: boolean; waitlistForItem?: string; queuePosition?: number } | null>(null);
 
   // Cached inventory with default stock values (0ms render time)
   const [inventory, setInventory] = useState<Record<string, { inUse: number, limit: number }>>(() => {
@@ -226,6 +255,7 @@ export default function GuestView() {
         }
 
         const pendingCounts = new Map<string, number>();
+        const wlCounts: Record<string, number> = {};
         for (const r of liveReqs || []) {
           if (r.status === "pending") {
             const matchedCanonical = new Set<string>();
@@ -235,7 +265,14 @@ export default function GuestView() {
             for (const norm of matchedCanonical) {
               pendingCounts.set(norm, (pendingCounts.get(norm) || 0) + 1);
             }
+            if (r.isWaitlist && r.waitlistForItem) {
+              const wlNorm = normalizeReturnableName(r.waitlistForItem);
+              wlCounts[wlNorm] = (wlCounts[wlNorm] || 0) + 1;
+            }
           }
+        }
+        if (isMounted) {
+          setWaitlistCounts(wlCounts);
         }
 
         const invMap: Record<string, { inUse: number, limit: number }> = {};
@@ -412,6 +449,14 @@ export default function GuestView() {
         const isLimited = COMMON_ITEMS.find(i => i.name === item)?.isLimited ?? (inv !== undefined);
         const isOutOfStock = isLimited && inv && (availableUnits < neededUnits);
         const isOutOfService = checkIsItemOutOfService(item);
+        const isReturnable = isReturnableItem(item);
+        const isManualOutOfService = amenitiesStatus[item] === 'out_of_service' || amenitiesStatus[normalizeReturnableName(item)] === 'out_of_service';
+
+        // Do not auto-deselect returnable items that can be waitlisted!
+        if (isReturnable && !isManualOutOfService) {
+          return false;
+        }
+
         return isOutOfStock || isOutOfService;
       });
 
@@ -428,11 +473,83 @@ export default function GuestView() {
     });
   }, [inventory, amenitiesStatus]);
 
+  const [activeTab, setActiveTab] = useState<AmenitySection>("daily");
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [copiedWifi, setCopiedWifi] = useState(false);
+  const [copiedUpi, setCopiedUpi] = useState(false);
+  const [showTermsModal, setShowTermsModal] = useState(false);
+
   const toggleItem = (item: string) => {
     setSelectedItems((prev) =>
       prev.includes(item) ? prev.filter((i) => i !== item) : [...prev, item]
     );
   };
+
+  const handleUpdateItemString = (oldPattern: string, newString: string | null) => {
+    setSelectedItems(prev => {
+      const filtered = prev.filter(s => s !== oldPattern);
+      if (newString && !filtered.includes(newString)) {
+        return [...filtered, newString];
+      }
+      return filtered;
+    });
+  };
+
+  const handleCopyWifi = () => {
+    navigator.clipboard.writeText("HuesStay123@").catch(() => {});
+    setCopiedWifi(true);
+    toast.success("WiFi password copied: HuesStay123@");
+    setTimeout(() => setCopiedWifi(false), 2000);
+  };
+
+  const handleCopyUpi = () => {
+    navigator.clipboard.writeText("huesstay@okicici").catch(() => {});
+    setCopiedUpi(true);
+    toast.success("UPI ID copied: huesstay@okicici");
+    setTimeout(() => setCopiedUpi(false), 2000);
+  };
+
+  const handleQuickAction = (action: "checkout" | "late_checkout" | "extend") => {
+    if (action === "checkout") {
+      const msg = "Inform Checkout: Room ready for checkout inspection.";
+      setCustomMessage(prev => prev ? `${prev}\n${msg}` : msg);
+      toast.success("Added 'Inform Checkout' note.");
+    } else if (action === "late_checkout") {
+      const msg = "Request Late Checkout: Please inform availability and charges.";
+      setCustomMessage(prev => prev ? `${prev}\n${msg}` : msg);
+      toast.success("Added 'Request Late Checkout' note.");
+    } else if (action === "extend") {
+      const msg = "Request Stay Extension: Would like to extend stay.";
+      setCustomMessage(prev => prev ? `${prev}\n${msg}` : msg);
+      toast.success("Added 'Request Stay Extension' note.");
+    }
+    const el = document.getElementById("other-requests-section");
+    if (el) el.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const tab1Count = React.useMemo(() => {
+    return selectedItems.filter(s => {
+      const b = extractBaseItemName(s).toLowerCase();
+      return PAGE_1_DAILY_ITEMS.some(p => p.name.toLowerCase().includes(b) || b.includes(p.name.toLowerCase()));
+    }).length;
+  }, [selectedItems]);
+
+  const tab2Count = React.useMemo(() => {
+    return selectedItems.filter(s => {
+      const b = extractBaseItemName(s).toLowerCase();
+      return PAGE_2_RETURNABLE_ITEMS.some(p => p.name.toLowerCase().includes(b) || b.includes(p.name.toLowerCase()));
+    }).length;
+  }, [selectedItems]);
+
+  const tab3Count = React.useMemo(() => {
+    return selectedItems.filter(s => {
+      const b = extractBaseItemName(s).toLowerCase();
+      return (
+        PAGE_3_FNB_DEPOSIT_ITEMS.some(p => p.name.toLowerCase().includes(b) || b.includes(p.name.toLowerCase())) ||
+        PAGE_3_QUICK_FOOD_ITEMS.some(p => p.name.toLowerCase().includes(b) || b.includes(p.name.toLowerCase()))
+      );
+    }).length;
+  }, [selectedItems]);
 
   const handleManualRoomSelect = (num: string) => {
     const trimmed = num.trim();
@@ -450,8 +567,16 @@ export default function GuestView() {
       return;
     }
 
-    // Verify no selected item is currently out of service
-    const outOfServiceSelected = selectedItems.filter(item => checkIsItemOutOfService(item));
+    // Verify no selected item is currently out of service (except waitlistable returnable appliances)
+    const outOfServiceSelected = selectedItems.filter(item => {
+      const canonical = normalizeReturnableName(item);
+      const isReturnable = isReturnableItem(canonical) || isReturnableItem(item);
+      const isManualOutOfService = amenitiesStatus[item] === 'out_of_service' || amenitiesStatus[canonical] === 'out_of_service';
+      if (isReturnable && !isManualOutOfService) {
+        return false;
+      }
+      return checkIsItemOutOfService(item) || checkIsItemOutOfService(canonical);
+    });
     if (outOfServiceSelected.length > 0) {
       toast.error(`${outOfServiceSelected.join(", ")} ${outOfServiceSelected.length > 1 ? 'are' : 'is'} currently unavailable. Please remove from your selection.`);
       return;
@@ -470,7 +595,13 @@ export default function GuestView() {
       const neededUnits = getItemUnitConsumption(item);
       if (inv) {
         const available = Math.max(0, inv.limit - inv.inUse);
+        const isReturnable = isReturnableItem(item);
+        const isManualOutOfService = amenitiesStatus[item] === 'out_of_service' || amenitiesStatus[normalizeReturnableName(item)] === 'out_of_service';
         if (available < neededUnits) {
+          if (isReturnable && !isManualOutOfService) {
+            // Eligible for Floor-to-Floor smart waitlist reservation!
+            continue;
+          }
           toast.error(`${item} is currently unavailable. Please remove it from your selection.`);
           return;
         }
@@ -493,14 +624,32 @@ export default function GuestView() {
       const finalItems = [...selectedItems];
       const reqId = `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
+      // Check if any requested item is an in-use returnable appliance
+      const waitlistCandidate = finalItems.find(item => {
+        if (!isReturnableItem(item)) return false;
+        const inv = getInventoryData(item);
+        const neededUnits = getItemUnitConsumption(item);
+        const available = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
+        return inv && available < neededUnits;
+      });
+
+      const isWaitlist = Boolean(waitlistCandidate);
+      const waitlistForItem = waitlistCandidate ? normalizeReturnableName(waitlistCandidate) : undefined;
+      const currentQueue = waitlistForItem ? (waitlistCounts[waitlistForItem] || 0) : 0;
+      const queuePosition = isWaitlist ? currentQueue + 1 : undefined;
+
       // Append Name and Phone Number to custom message
-      const formattedMessage = [
+      let formattedMessage = [
         `Guest Name: ${guestName.trim()}`,
         `Phone Number: ${phoneNumber.trim()}`,
         customMessage.trim() ? `\nMessage:\n${customMessage.trim()}` : ""
       ].filter(Boolean).join("\n");
 
-      const requestData = {
+      if (isWaitlist && waitlistForItem) {
+        formattedMessage = `[WAITLIST: ${waitlistForItem}#${queuePosition}] ${formattedMessage}`;
+      }
+
+      const requestData: any = {
         id: reqId,
         roomId: roomNumber,
         qrCodeHash: hash || roomNumber,
@@ -508,8 +657,12 @@ export default function GuestView() {
         customMessage: formattedMessage,
         status: "pending" as const,
         createdAt: Date.now(),
+        isWaitlist,
+        waitlistForItem,
+        queuePosition
       };
 
+      setSubmittedWaitlistInfo({ isWaitlist, waitlistForItem, queuePosition });
       setLastSubmittedId(reqId);
       try {
         sessionStorage.setItem("hues_last_req_id", reqId);
@@ -524,9 +677,22 @@ export default function GuestView() {
           items: finalItems,
           custom_message: formattedMessage,
           status: "pending",
-          created_at: requestData.createdAt
+          created_at: requestData.createdAt,
+          is_waitlist: isWaitlist,
+          waitlist_for_item: waitlistForItem || null,
+          queue_position: queuePosition || null
         }, { onConflict: "id" }).then(({ error }) => {
-          if (error) console.warn("[GUEST] Supabase write error:", error.message);
+          if (error) {
+            console.warn("[GUEST] Supabase write retry with base columns:", error.message);
+            sb.from("guest_requests").upsert({
+              id: reqId,
+              room_id: String(roomNumber),
+              items: finalItems,
+              custom_message: formattedMessage,
+              status: "pending",
+              created_at: requestData.createdAt
+            }, { onConflict: "id" }).catch(() => {});
+          }
         });
       }
 
@@ -553,7 +719,7 @@ export default function GuestView() {
       ]);
 
       setIsSuccess(true);
-      toast.success("Request sent to front desk!");
+      toast.success(isWaitlist ? `Reserved! You are in line for ${waitlistForItem}.` : "Request sent to front desk!");
     } catch (error) {
       console.error("Error submitting request:", error);
       setIsSuccess(true);
@@ -584,6 +750,7 @@ export default function GuestView() {
     } catch (e) {}
 
     setLastSubmittedId(null);
+    setSubmittedWaitlistInfo(null);
     setIsSuccess(false);
     setSelectedItems([]);
     setCustomMessage("");
@@ -616,10 +783,14 @@ export default function GuestView() {
       <RequestSuccessScreen
         roomNumber={roomNumber}
         selectedItems={selectedItems}
+        isWaitlist={submittedWaitlistInfo?.isWaitlist}
+        waitlistForItem={submittedWaitlistInfo?.waitlistForItem}
+        queuePosition={submittedWaitlistInfo?.queuePosition}
         onMakeAnotherRequest={() => {
           setIsSuccess(false);
           setSelectedItems([]);
           setCustomMessage("");
+          setSubmittedWaitlistInfo(null);
         }}
         onCancelRequest={handleCancelRequest}
       />
@@ -644,69 +815,304 @@ export default function GuestView() {
   const totalRequestedCount = selectedItems.length;
 
   return (
-    <div className="min-h-screen bg-[#F9F7F4] text-[#2D2926] pb-20 font-sans">
+    <div className="min-h-screen bg-[#F9F7F4] text-[#2D2926] pb-24 font-sans">
       <Toaster position="top-center" />
       
       {/* Header */}
-      <header className="h-44 bg-[#1A1A1A] text-white p-8 flex flex-col justify-end relative mb-8">
-        <div className="absolute top-6 left-8 text-[11px] uppercase tracking-[0.2em] opacity-60">
+      <header className="h-44 bg-[#1A1A1A] text-white p-8 flex flex-col justify-end relative mb-6 shadow-md">
+        <div className="absolute top-6 left-8 text-[11px] uppercase tracking-[0.25em] text-[#CBB99D] font-medium">
           Hues Stay Luxury Rooms
         </div>
         <div className="max-w-4xl mx-auto w-full text-left">
-          <h1 className="text-4xl font-serif italic mb-1">Room {roomNumber}</h1>
-          <p className="text-sm opacity-80 max-w-md">Enjoy your stay. Tap items below to request instant service.</p>
+          <h1 className="text-4xl font-serif italic mb-1 text-white">Room {roomNumber}</h1>
+          <p className="text-xs sm:text-sm text-neutral-300 max-w-md">
+            Welcome! Select services, borrow appliances, or order F&B essentials below.
+          </p>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-6">
-        {/* Info Tiles: Service Timings, WiFi, Supervisor Details */}
-        <div className="space-y-3 mb-8">
-          <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center text-[#8C857D] text-sm uppercase tracking-widest font-mono select-none">
-            Service Timings (Perferably): 9:00 AM to 8:00 PM 
+      <main className="max-w-4xl mx-auto px-4 sm:px-6 space-y-6">
+        {/* COMMON TOP SECTION */}
+        <section className="space-y-4">
+          {/* Service Timings Banner */}
+          <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 sm:p-4 text-center text-[#2D2926] shadow-2xs">
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-3 text-xs sm:text-sm">
+              <span className="font-semibold uppercase tracking-wider text-[#A68966] flex items-center gap-1.5">
+                <Clock className="w-4 h-4" />
+                Service Timings:
+              </span>
+              <span className="font-medium text-[#2D2926]">9:00 AM to 8:00 PM</span>
+              <span className="text-[#8C857D] hidden sm:inline">•</span>
+              <span className="text-xs text-[#8C857D] italic">
+                Housekeeping between 10:00 AM – 4:00 PM
+              </span>
+            </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center font-mono select-none">
-              <span className="text-[#A68966] font-semibold block text-[11px] uppercase tracking-widest mb-1">WiFi Network & Password</span>
-              <span className="font-semibold text-[#2D2926] text-sm sm:text-base tracking-normal select-all">HuesStay123@</span>
+
+          {/* Hotel Key Info Cards: WiFi, Supervisor, Drinking Water, Self Cooking Kitchen */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {/* WiFi */}
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
+                <Wifi className="w-3.5 h-3.5" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider">WiFi Password</span>
+              </div>
+              <div className="font-mono font-bold text-xs sm:text-sm text-[#2D2926] truncate">
+                HuesStay123@
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyWifi}
+                className="mt-2 text-[10px] uppercase font-bold tracking-wider text-[#A68966] hover:text-[#8E7455] flex items-center justify-center gap-1 cursor-pointer"
+              >
+                {copiedWifi ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
+                {copiedWifi ? "Copied" : "Copy"}
+              </button>
             </div>
-            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 text-center font-mono select-none">
-              <span className="text-[#A68966] font-semibold block text-[11px] uppercase tracking-widest mb-1">Supervisor Contact Number</span>
-              <a href="tel:8431995152" className="font-semibold text-[#2D2926] text-sm sm:text-base tracking-normal hover:underline">8431995152</a>
+
+            {/* Supervisor */}
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
+                <Phone className="w-3.5 h-3.5" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider">Supervisor</span>
+              </div>
+              <a
+                href="tel:8431995152"
+                className="font-mono font-bold text-xs sm:text-sm text-[#2D2926] hover:underline"
+              >
+                8431995152
+              </a>
+              <a
+                href="tel:8431995152"
+                className="mt-2 text-[10px] uppercase font-bold tracking-wider text-[#A68966] hover:text-[#8E7455] flex items-center justify-center gap-1"
+              >
+                <Phone className="w-3 h-3" />
+                Call Now
+              </a>
             </div>
+
+            {/* Drinking Water */}
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
+                <Droplets className="w-3.5 h-3.5" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider">Water</span>
+              </div>
+              <div className="font-serif text-xs sm:text-sm text-[#2D2926] font-medium leading-tight">
+                G, 3rd & Terrace
+              </div>
+              <span className="mt-2 text-[10px] text-[#8C857D] italic">
+                Water Dispensers
+              </span>
+            </div>
+
+            {/* Self Cooking Kitchen */}
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-3 text-center flex flex-col justify-between shadow-2xs">
+              <div className="flex items-center justify-center gap-1.5 text-[#A68966] mb-1">
+                <Utensils className="w-3.5 h-3.5" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider">Kitchen</span>
+              </div>
+              <div className="font-serif text-xs sm:text-sm text-[#2D2926] font-medium leading-tight">
+                Ground Floor
+              </div>
+              <span className="mt-2 text-[10px] text-[#8C857D] italic">
+                Self Cooking Area
+              </span>
+            </div>
+          </div>
+
+          {/* UPI PAYMENT QR CARD */}
+          <div className="bg-white border border-[#E5E1DB] p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+            <div className="flex items-center gap-4 w-full sm:w-auto">
+              {/* QR Image Thumbnail */}
+              <div
+                onClick={() => setShowQrModal(true)}
+                className="relative group cursor-pointer shrink-0 border border-[#E5E1DB] p-1 bg-white hover:border-[#A68966] transition-colors"
+                title="Tap to enlarge QR code"
+              >
+                <img
+                  src={upiQrImage}
+                  alt="Hues Stay UPI QR Code"
+                  className="w-16 h-16 sm:w-20 sm:h-20 object-contain"
+                />
+                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                  <Maximize2 className="w-4 h-4" />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center gap-2 mb-0.5">
+                  <QrCode className="w-4 h-4 text-[#A68966]" />
+                  <h3 className="font-serif text-base sm:text-lg font-medium text-[#2D2926]">
+                    Hues Stay UPI Payment
+                  </h3>
+                </div>
+                <p className="text-xs text-[#8C857D] mb-1">
+                  Scan to pay deposit, room charges, or groceries via any UPI app.
+                </p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-mono text-xs font-semibold bg-[#FAF8F5] border border-[#E5E1DB] px-2 py-0.5 text-[#2D2926] select-all">
+                    huesstay@okicici
+                  </span>
+                  <span className="text-[10px] text-[#8C857D]">
+                    GPay • PhonePe • Paytm • BHIM
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowQrModal(true)}
+                className="px-3.5 py-2 border border-[#2D2926] bg-[#2D2926] text-white hover:bg-neutral-800 text-xs font-semibold uppercase tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                Scan QR
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyUpi}
+                className="px-3.5 py-2 border border-[#E5E1DB] bg-[#FAF8F5] hover:bg-[#F2EFE9] text-[#2D2926] text-xs font-semibold uppercase tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                {copiedUpi ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5 text-[#A68966]" />}
+                {copiedUpi ? "Copied" : "Copy UPI"}
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Action Buttons */}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-[#8C857D] w-full sm:w-auto mb-1 sm:mb-0">
+              Quick Actions:
+            </span>
+            <button
+              type="button"
+              onClick={() => handleQuickAction("checkout")}
+              className="flex-1 sm:flex-none px-3.5 py-2 border border-[#E5E1DB] bg-white hover:bg-[#FAF8F5] text-xs font-medium text-[#2D2926] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+            >
+              <LogOut className="w-3.5 h-3.5 text-[#A68966]" />
+              Inform Checkout
+            </button>
+            <button
+              type="button"
+              onClick={() => handleQuickAction("late_checkout")}
+              className="flex-1 sm:flex-none px-3.5 py-2 border border-[#E5E1DB] bg-white hover:bg-[#FAF8F5] text-xs font-medium text-[#2D2926] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+            >
+              <Clock className="w-3.5 h-3.5 text-[#A68966]" />
+              Request Late Checkout
+            </button>
+            <button
+              type="button"
+              onClick={() => handleQuickAction("extend")}
+              className="flex-1 sm:flex-none px-3.5 py-2 border border-[#E5E1DB] bg-white hover:bg-[#FAF8F5] text-xs font-medium text-[#2D2926] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+            >
+              <Calendar className="w-3.5 h-3.5 text-[#A68966]" />
+              Request Stay Extension
+            </button>
+          </div>
+        </section>
+
+        {/* 3 DISTINCT PAGES / TABS NAVIGATION BAR */}
+        <div className="sticky top-0 z-30 bg-[#F9F7F4] pt-2 pb-1">
+          <div className="flex border border-[#E5E1DB] bg-white p-1 shadow-sm">
+            <button
+              type="button"
+              onClick={() => setActiveTab("daily")}
+              className={`flex-1 py-3 px-2 text-xs font-semibold tracking-wider uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                activeTab === "daily"
+                  ? "bg-[#2D2926] text-white shadow-xs"
+                  : "text-[#8C857D] hover:text-[#2D2926] hover:bg-[#FAF8F5]"
+              }`}
+            >
+              <span>1. Daily Services</span>
+              {tab1Count > 0 && (
+                <span className={`text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold ${
+                  activeTab === "daily" ? "bg-[#A68966] text-white" : "bg-[#2D2926] text-white"
+                }`}>
+                  {tab1Count}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("returnable")}
+              className={`flex-1 py-3 px-2 text-xs font-semibold tracking-wider uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                activeTab === "returnable"
+                  ? "bg-[#2D2926] text-white shadow-xs"
+                  : "text-[#8C857D] hover:text-[#2D2926] hover:bg-[#FAF8F5]"
+              }`}
+            >
+              <span>2. Returnable Items</span>
+              {tab2Count > 0 && (
+                <span className={`text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold ${
+                  activeTab === "returnable" ? "bg-[#A68966] text-white" : "bg-[#2D2926] text-white"
+                }`}>
+                  {tab2Count}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("fnb")}
+              className={`flex-1 py-3 px-2 text-xs font-semibold tracking-wider uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                activeTab === "fnb"
+                  ? "bg-[#2D2926] text-white shadow-xs"
+                  : "text-[#8C857D] hover:text-[#2D2926] hover:bg-[#FAF8F5]"
+              }`}
+            >
+              <span>3. F&B Essentials</span>
+              {tab3Count > 0 && (
+                <span className={`text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold ${
+                  activeTab === "fnb" ? "bg-[#A68966] text-white" : "bg-[#2D2926] text-white"
+                }`}>
+                  {tab3Count}
+                </span>
+              )}
+            </button>
           </div>
         </div>
 
+        {/* MAIN REQUEST FORM */}
         <form onSubmit={handleProceedToGuestForm} className="space-y-8">
           <AmenityGridSection
+            activeTab={activeTab}
             deletedItems={deletedItems}
             selectedItems={selectedItems}
             inventory={inventory}
             getInventoryData={getInventoryData}
             checkIsItemOutOfService={checkIsItemOutOfService}
             onToggleItem={toggleItem}
+            onUpdateItemString={handleUpdateItemString}
+            waitlistCounts={waitlistCounts}
+            amenitiesStatus={amenitiesStatus}
           />
 
-          <section>
-            <h2 className="text-xl font-serif mb-4">Other Requests</h2>
+          <section id="other-requests-section">
+            <h2 className="text-xl font-serif mb-2 text-[#2D2926]">Other Requests & Notes</h2>
+            <p className="text-xs text-[#8C857D] mb-3">
+              Need anything specific? Mention custom checkout times, grocery items, or special instructions.
+            </p>
             <textarea
               value={customMessage}
               onChange={(e) => setCustomMessage(e.target.value)}
-              placeholder="E.g., Let me know late checkout charges..."
-              className="w-full p-6 border border-[#E5E1DB] bg-white text-[#2D2926] placeholder:text-[#8C857D] focus:outline-none focus:border-[#A68966] min-h-[120px] resize-none rounded-none"
+              placeholder="E.g., Please send fresh towels, or let me know late checkout availability..."
+              className="w-full p-4 sm:p-5 border border-[#E5E1DB] bg-white text-[#2D2926] placeholder:text-[#8C857D] focus:outline-none focus:border-[#A68966] min-h-[110px] resize-none rounded-none text-sm"
             ></textarea>
           </section>
 
-          <div className="bg-white border border-[#E5E1DB] p-6 flex gap-3 text-[#8C857D]">
+          <div className="bg-white border border-[#E5E1DB] p-4 sm:p-5 flex gap-3 text-[#8C857D] text-xs">
             <Info className="w-5 h-5 shrink-0 text-[#A68966]" />
-            <p className="text-sm italic">
-              Your request will be sent instantly to our housekeeping team. We aim to fulfill ASAP.
+            <p className="italic leading-relaxed">
+              Your request will be dispatched instantly to our on-duty housekeeping team. Returnable appliances and dining utensils will be brought to Room {roomNumber} promptly.
             </p>
           </div>
 
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full py-4 bg-[#A68966] text-white font-medium uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center rounded-none shadow-sm cursor-pointer"
+            className="w-full py-4 bg-[#A68966] text-white font-semibold uppercase tracking-[0.2em] text-xs hover:bg-[#8E7455] transition-colors disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center rounded-none shadow-sm cursor-pointer"
           >
             {isSubmitting ? (
               <>
@@ -718,7 +1124,155 @@ export default function GuestView() {
             )}
           </button>
         </form>
+
+        {/* Footer with Terms and Conditions Link */}
+        <footer className="pt-6 border-t border-[#E5E1DB] text-center text-xs text-[#8C857D]">
+          <button
+            type="button"
+            onClick={() => setShowTermsModal(true)}
+            className="text-[#A68966] hover:underline font-medium uppercase tracking-wider text-[11px] cursor-pointer"
+          >
+            Terms and Conditions • House Rules
+          </button>
+          <p className="mt-2 text-[11px] text-[#A8A29E]">
+            Hues Stay Luxury Rooms • Direct Guest Concierge
+          </p>
+        </footer>
       </main>
+
+      {/* FULL-SIZE PAYMENT QR LIGHTBOX MODAL */}
+      {showQrModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setShowQrModal(false)}
+        >
+          <div
+            className="bg-white max-w-sm w-full p-6 text-center shadow-2xl relative border border-[#E5E1DB]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setShowQrModal(false)}
+              className="absolute top-4 right-4 p-1.5 text-[#8C857D] hover:text-[#2D2926] cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[#A68966] mb-1">
+              Google Pay • PhonePe • Paytm
+            </div>
+            <h3 className="font-serif text-2xl font-bold text-[#2D2926] mb-4">
+              Hues Stay Payment QR
+            </h3>
+
+            <div className="bg-[#FAF8F5] border border-[#E5E1DB] p-4 mb-4 flex justify-center">
+              <img
+                src={upiQrImage}
+                alt="Hues Stay Google Pay QR Code"
+                className="w-64 h-auto object-contain max-h-72"
+              />
+            </div>
+
+            <div className="mb-4">
+              <span className="text-xs text-[#8C857D] block mb-1">Official UPI ID:</span>
+              <div className="font-mono font-bold text-sm bg-[#FAF8F5] border border-[#E5E1DB] py-2 px-3 text-[#2D2926] select-all">
+                huesstay@okicici
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={handleCopyUpi}
+                className="flex-1 py-3 bg-[#A68966] text-white text-xs font-semibold uppercase tracking-wider hover:bg-[#8E7455] transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                {copiedUpi ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                {copiedUpi ? "UPI ID Copied!" : "Copy UPI ID"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowQrModal(false)}
+                className="px-5 py-3 border border-[#E5E1DB] text-[#2D2926] text-xs font-semibold uppercase tracking-wider hover:bg-neutral-100 transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TERMS & CONDITIONS / HOUSE RULES MODAL */}
+      {showTermsModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setShowTermsModal(false)}
+        >
+          <div
+            className="bg-white max-w-lg w-full p-6 sm:p-8 text-left shadow-2xl relative border border-[#E5E1DB] max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setShowTermsModal(false)}
+              className="absolute top-4 right-4 p-1.5 text-[#8C857D] hover:text-[#2D2926] cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[#A68966] mb-1">
+              Hues Stay Policies
+            </div>
+            <h3 className="font-serif text-2xl font-bold text-[#2D2926] mb-4">
+              Terms & Conditions • House Rules
+            </h3>
+
+            <div className="space-y-4 text-xs text-[#2D2926] leading-relaxed">
+              <div className="border-b border-[#E5E1DB] pb-3">
+                <h4 className="font-semibold text-sm mb-1 text-[#2D2926]">1. Service Timings</h4>
+                <p className="text-[#8C857D]">
+                  Daily room service and front desk assistance are available between <strong>9:00 AM and 8:00 PM</strong>. Daily housekeeping is conducted strictly between <strong>10:00 AM and 4:00 PM</strong>.
+                </p>
+              </div>
+
+              <div className="border-b border-[#E5E1DB] pb-3">
+                <h4 className="font-semibold text-sm mb-1 text-[#2D2926]">2. Returnable Appliances (Shared Inventory)</h4>
+                <p className="text-[#8C857D]">
+                  Appliances (Iron Box, Kettle, Hair Dryer, Laptop Table, Hot Pack) are shared property. Please return them promptly when finished so other guests can use them. If all units are taken, guests are added to the Smart Waitlist and items are relayed directly.
+                </p>
+              </div>
+
+              <div className="border-b border-[#E5E1DB] pb-3">
+                <h4 className="font-semibold text-sm mb-1 text-[#2D2926]">3. Dining Utensils & Refundable Deposit</h4>
+                <p className="text-[#8C857D]">
+                  A refundable deposit of <strong>₹100/- per item</strong> is collected for kitchen and dining utensils (Plates, Cups, Bowls, Glasses, Bottles, Oil Dispensers). Guests must self-clean utensils after use before returning; uncleaned items will have cleaning charges deducted from the deposit amount.
+                </p>
+              </div>
+
+              <div className="border-b border-[#E5E1DB] pb-3">
+                <h4 className="font-semibold text-sm mb-1 text-[#2D2926]">4. Checkout & Stay Extension</h4>
+                <p className="text-[#8C857D]">
+                  Standard checkout is by 11:00 AM. Please inform the team prior to checking out for a quick room clearance. Late checkouts and stay extensions are subject to room availability and nominal charges.
+                </p>
+              </div>
+
+              <div>
+                <h4 className="font-semibold text-sm mb-1 text-[#2D2926]">5. General Decorum</h4>
+                <p className="text-[#8C857D]">
+                  Quiet hours are observed between 10:00 PM and 7:00 AM. Smoking inside rooms is strictly prohibited. For any urgent support, reach our supervisor directly at <strong>8431995152</strong>.
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowTermsModal(false)}
+              className="mt-6 w-full py-3 bg-[#2D2926] text-white text-xs font-semibold uppercase tracking-wider hover:bg-neutral-800 transition-colors cursor-pointer"
+            >
+              I Understand & Agree
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -85,6 +85,9 @@ export interface RequestRecord {
   customMessage: string;
   status: "pending" | "completed";
   createdAt: number;
+  isWaitlist?: boolean;
+  waitlistForItem?: string;
+  queuePosition?: number;
 }
 
 /**
@@ -97,19 +100,42 @@ export async function saveRequestToSupabase(req: RequestRecord): Promise<{ succe
   }
 
   try {
-    const payload = {
+    const payload: any = {
       id: req.id,
       room_id: String(req.roomId),
       items: Array.isArray(req.items) ? req.items : [],
       custom_message: req.customMessage || "",
       status: req.status || "pending",
       created_at: req.createdAt || Date.now(),
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
+      is_waitlist: Boolean(req.isWaitlist),
+      waitlist_for_item: req.waitlistForItem || null,
+      queue_position: req.queuePosition || null
     };
 
-    const { error } = await supabase
+    let { error } = await supabase
       .from(SUPABASE_TABLE_NAME)
       .upsert(payload, { onConflict: "id" });
+
+    if (error && (error.message?.includes("column") || error.code === "PGRST204" || error.code === "42703")) {
+      console.warn("[SUPABASE] Table lacks waitlist columns, falling back to base columns:", error.message);
+      // Prepend waitlist marker into custom_message as fallback
+      let fallbackMessage = req.customMessage || "";
+      if (req.isWaitlist && req.waitlistForItem) {
+        fallbackMessage = `[WAITLIST: ${req.waitlistForItem}#${req.queuePosition || 1}] ${fallbackMessage}`.trim();
+      }
+      const basePayload = {
+        id: req.id,
+        room_id: String(req.roomId),
+        items: Array.isArray(req.items) ? req.items : [],
+        custom_message: fallbackMessage,
+        status: req.status || "pending",
+        created_at: req.createdAt || Date.now(),
+        updated_at: new Date().toISOString()
+      };
+      const retry = await supabase.from(SUPABASE_TABLE_NAME).upsert(basePayload, { onConflict: "id" });
+      error = retry.error;
+    }
 
     if (error) {
       console.warn("[SUPABASE] Insert/Upsert error:", error.message);
@@ -216,14 +242,34 @@ export async function fetchRequestsFromSupabase(includeDeleted = false): Promise
     const filteredRows = (includeDeleted ? data : data.filter((row: any) => !row.is_deleted_from_dashboard))
       .filter((row: any) => row.room_id !== "SETTINGS" && !String(row.id || "").startsWith("system-"));
 
-    const mapped: RequestRecord[] = filteredRows.map((row: any) => ({
-      id: row.id,
-      roomId: row.room_id,
-      items: Array.isArray(row.items) ? row.items : [],
-      customMessage: row.custom_message || "",
-      status: row.status === "completed" ? "completed" : "pending",
-      createdAt: Number(row.created_at) || Date.now(),
-    }));
+    const mapped: RequestRecord[] = filteredRows.map((row: any) => {
+      let isWaitlist = !!row.is_waitlist;
+      let waitlistForItem = row.waitlist_for_item || undefined;
+      let queuePosition = typeof row.queue_position === "number" ? row.queue_position : undefined;
+
+      // Also parse fallback marker in custom_message if columns were missing
+      const msg = String(row.custom_message || "");
+      if (!isWaitlist && msg.startsWith("[WAITLIST:")) {
+        isWaitlist = true;
+        const match = msg.match(/\[WAITLIST:\s*([^\]#]+)(?:#(\d+))?\]/i);
+        if (match) {
+          waitlistForItem = match[1]?.trim();
+          if (match[2]) queuePosition = parseInt(match[2], 10);
+        }
+      }
+
+      return {
+        id: row.id,
+        roomId: row.room_id,
+        items: Array.isArray(row.items) ? row.items : [],
+        customMessage: row.custom_message || "",
+        status: row.status === "completed" ? "completed" : "pending",
+        createdAt: Number(row.created_at) || Date.now(),
+        isWaitlist,
+        waitlistForItem,
+        queuePosition,
+      };
+    });
 
     // Deduplicate any accidental duplicate records within a 3-minute window in O(N) time
     const result: RequestRecord[] = [];
@@ -343,6 +389,8 @@ export interface BorrowedRecord {
   createdAt: number;
   returnedAt?: number;
   requestId?: string;
+  relayedFromRoom?: string;
+  relayCount?: number;
 }
 
 export async function saveBorrowedToSupabase(b: BorrowedRecord): Promise<{ success: boolean; error?: string }> {
@@ -350,18 +398,34 @@ export async function saveBorrowedToSupabase(b: BorrowedRecord): Promise<{ succe
   if (!supabase) return { success: false, error: "Supabase not configured" };
 
   try {
-    const payload = {
+    const payload: any = {
       id: b.id,
       room_id: String(b.roomId),
       item_name: b.itemName,
       status: b.status,
       created_at: b.createdAt || Date.now(),
-      returned_at: b.returnedAt ? new Date(b.returnedAt).toISOString() : null
+      returned_at: b.returnedAt ? new Date(b.returnedAt).toISOString() : null,
+      relayed_from_room: b.relayedFromRoom || null,
+      relay_count: b.relayCount || 0
     };
 
-    const { error } = await supabase
+    let { error } = await supabase
       .from(SUPABASE_BORROWED_TABLE)
       .upsert(payload, { onConflict: "id" });
+
+    if (error && (error.message?.includes("column") || error.code === "PGRST204" || error.code === "42703")) {
+      console.warn("[SUPABASE] Borrowed table lacks relay columns, falling back to base columns:", error.message);
+      const basePayload = {
+        id: b.id,
+        room_id: String(b.roomId),
+        item_name: b.itemName,
+        status: b.status,
+        created_at: b.createdAt || Date.now(),
+        returned_at: b.returnedAt ? new Date(b.returnedAt).toISOString() : null
+      };
+      const retry = await supabase.from(SUPABASE_BORROWED_TABLE).upsert(basePayload, { onConflict: "id" });
+      error = retry.error;
+    }
 
     if (error) {
       console.warn("[SUPABASE] Borrowed upsert error:", error.message);
@@ -390,6 +454,54 @@ export async function markBorrowedReturnedInSupabase(id: string): Promise<{ succ
   }
 }
 
+/**
+ * Floor-to-Floor Relay: Atomically relays an active appliance from sourceRoom to targetRoom
+ */
+export async function relayBorrowedItemInSupabase(
+  sourceBorrowedId: string,
+  sourceRoomId: string,
+  targetRoomId: string,
+  itemName: string,
+  targetRequestId?: string,
+  currentRelayCount?: number
+): Promise<{ success: boolean; newBorrowed?: BorrowedRecord; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { success: false, error: "Supabase not configured" };
+
+  try {
+    // 1. Mark source item returned
+    if (sourceBorrowedId) {
+      await supabase
+        .from(SUPABASE_BORROWED_TABLE)
+        .update({ status: "returned", returned_at: new Date().toISOString() })
+        .eq("id", sourceBorrowedId);
+    }
+
+    // 2. Create new borrowed record for target room
+    const newRecord: BorrowedRecord = {
+      id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      roomId: String(targetRoomId),
+      itemName,
+      status: "borrowed",
+      createdAt: Date.now(),
+      requestId: targetRequestId,
+      relayedFromRoom: String(sourceRoomId),
+      relayCount: (currentRelayCount || 0) + 1
+    };
+
+    await saveBorrowedToSupabase(newRecord);
+
+    // 3. Complete target request if provided
+    if (targetRequestId) {
+      await updateRequestStatusInSupabase(targetRequestId, "completed");
+    }
+
+    return { success: true, newBorrowed: newRecord };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+}
+
 export async function fetchBorrowedFromSupabase(): Promise<BorrowedRecord[] | null> {
   const supabase = getSupabase();
   if (!supabase) return null;
@@ -409,7 +521,9 @@ export async function fetchBorrowedFromSupabase(): Promise<BorrowedRecord[] | nu
       itemName: row.item_name,
       status: row.status === "returned" ? "returned" : "borrowed",
       createdAt: Number(row.created_at) || Date.now(),
-      returnedAt: row.returned_at ? new Date(row.returned_at).getTime() : undefined
+      returnedAt: row.returned_at ? new Date(row.returned_at).getTime() : undefined,
+      relayedFromRoom: row.relayed_from_room || undefined,
+      relayCount: typeof row.relay_count === "number" ? row.relay_count : undefined
     }));
   } catch {
     return null;
