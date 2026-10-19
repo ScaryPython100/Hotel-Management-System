@@ -251,47 +251,52 @@ export async function dismissLiveRequest(id: string): Promise<boolean> {
 }
 
 /**
- * Save newly borrowed item directly to Supabase + notify server API
+ * Upsert a borrowed item directly in Supabase (falls back to base columns on older schemas)
  */
-export async function saveLiveBorrowed(item: BorrowedItem): Promise<boolean> {
-  let success = false;
-  const sb = getClientSupabase();
+async function upsertBorrowedDirect(sb: SupabaseClient, item: BorrowedItem): Promise<boolean> {
+  try {
+    const payload: any = {
+      id: item.id,
+      room_id: String(item.roomId),
+      item_name: item.itemName,
+      status: item.status,
+      created_at: item.createdAt || Date.now(),
+      returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null,
+      relayed_from_room: item.relayedFromRoom || null,
+      relay_count: item.relayCount || 0
+    };
+    let { error } = await sb
+      .from("borrowed_items")
+      .upsert(payload, { onConflict: "id" });
 
-  if (sb) {
-    try {
-      const payload: any = {
+    if (error && (error.message?.includes("column") || error.code === "PGRST204" || error.code === "42703")) {
+      console.warn("[CLIENT SUPABASE] Borrowed table lacks relay columns, falling back to base columns");
+      const basePayload = {
         id: item.id,
         room_id: String(item.roomId),
         item_name: item.itemName,
         status: item.status,
         created_at: item.createdAt || Date.now(),
-        returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null,
-        relayed_from_room: item.relayedFromRoom || null,
-        relay_count: item.relayCount || 0
+        returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null
       };
-      let { error } = await sb
-        .from("borrowed_items")
-        .upsert(payload, { onConflict: "id" });
-      
-      if (error && (error.message?.includes("column") || error.code === "PGRST204" || error.code === "42703")) {
-        console.warn("[CLIENT SUPABASE] Borrowed table lacks relay columns, falling back to base columns");
-        const basePayload = {
-          id: item.id,
-          room_id: String(item.roomId),
-          item_name: item.itemName,
-          status: item.status,
-          created_at: item.createdAt || Date.now(),
-          returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null
-        };
-        const retry = await sb.from("borrowed_items").upsert(basePayload, { onConflict: "id" });
-        error = retry.error;
-      }
-
-      if (!error) success = true;
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Save borrowed error:", err);
+      const retry = await sb.from("borrowed_items").upsert(basePayload, { onConflict: "id" });
+      error = retry.error;
     }
+
+    if (error) console.warn("[CLIENT SUPABASE] Save borrowed error:", error.message);
+    return !error;
+  } catch (err) {
+    console.warn("[CLIENT SUPABASE] Save borrowed error:", err);
+    return false;
   }
+}
+
+/**
+ * Save newly borrowed item directly to Supabase + notify server API
+ */
+export async function saveLiveBorrowed(item: BorrowedItem): Promise<boolean> {
+  const sb = getClientSupabase();
+  const success = sb ? await upsertBorrowedDirect(sb, item) : false;
 
   fetch("/api/borrowed", {
     method: "POST",
@@ -303,7 +308,8 @@ export async function saveLiveBorrowed(item: BorrowedItem): Promise<boolean> {
 }
 
 /**
- * Floor-to-Floor Relay: Atomically hands off an appliance from Room A to Room B directly
+ * Floor-to-Floor Relay: hands off an appliance from Room A to Room B.
+ * The new record is written before the source is released, so a failure never loses the item.
  */
 export async function relayLiveBorrowedItem(
   sourceBorrowedId: string,
@@ -313,61 +319,79 @@ export async function relayLiveBorrowedItem(
   targetRequestId?: string,
   currentRelayCount?: number
 ): Promise<boolean> {
-  let success = false;
   const sb = getClientSupabase();
   const newRelayCount = (currentRelayCount || 0) + 1;
-  const newBorrowedId = `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+  const newBorrowed: BorrowedItem = {
+    id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+    roomId: String(targetRoomId),
+    itemName,
+    status: "borrowed",
+    createdAt: Date.now(),
+    requestId: targetRequestId,
+    relayedFromRoom: String(sourceRoomId),
+    relayCount: newRelayCount
+  };
 
-  if (sb) {
+  // 1. Insert new borrowed item for target room
+  const inserted = sb ? await upsertBorrowedDirect(sb, newBorrowed) : false;
+
+  if (!inserted) {
+    // Nothing was written directly, so let the server perform the whole relay
     try {
-      // 1. Mark source item returned
-      if (sourceBorrowedId) {
-        await sb
-          .from("borrowed_items")
-          .update({ status: "returned", returned_at: new Date().toISOString() })
-          .eq("id", sourceBorrowedId);
-      }
-
-      // 2. Insert new borrowed item for target room
-      const newBorrowed: BorrowedItem = {
-        id: newBorrowedId,
-        roomId: String(targetRoomId),
-        itemName,
-        status: "borrowed",
-        createdAt: Date.now(),
-        requestId: targetRequestId,
-        relayedFromRoom: String(sourceRoomId),
-        relayCount: newRelayCount
-      };
-      await saveLiveBorrowed(newBorrowed);
-
-      // 3. Complete target request if provided
-      if (targetRequestId) {
-        await sb
-          .from("guest_requests")
-          .update({ status: "completed", updated_at: new Date().toISOString() })
-          .eq("id", targetRequestId);
-      }
-
-      success = true;
+      const res = await fetch("/api/borrowed/relay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceBorrowedId,
+          sourceRoomId,
+          targetRoomId,
+          itemName,
+          targetRequestId,
+          currentRelayCount
+        })
+      });
+      return res.ok;
     } catch (err) {
-      console.warn("[CLIENT SUPABASE] Relay borrowed error:", err);
+      console.warn("[API] Relay borrowed error:", err);
+      return false;
     }
   }
 
-  // Also notify server API for relay
-  fetch("/api/borrowed/relay", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sourceBorrowedId,
-      sourceRoomId,
-      targetRoomId,
-      itemName,
-      targetRequestId,
-      currentRelayCount
-    })
-  }).catch(() => {});
+  let success = true;
+
+  // 2. Mark source item returned
+  if (sourceBorrowedId) {
+    const { error } = await sb!
+      .from("borrowed_items")
+      .update({ status: "returned", returned_at: new Date().toISOString() })
+      .eq("id", sourceBorrowedId);
+    if (error) {
+      console.warn("[CLIENT SUPABASE] Relay mark source returned error:", error.message);
+      const res = await fetch(`/api/borrowed/${sourceBorrowedId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "returned" })
+      }).catch(() => null);
+      if (!res?.ok) success = false;
+    }
+  }
+
+  // 3. Complete target request if provided
+  if (targetRequestId) {
+    const { error } = await sb!
+      .from("guest_requests")
+      .update({ status: "completed", updated_at: new Date().toISOString() })
+      .eq("id", targetRequestId);
+    if (error) {
+      console.warn("[CLIENT SUPABASE] Relay complete request error:", error.message);
+      const res = await fetch(`/api/requests/${targetRequestId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "completed" })
+      }).catch(() => null);
+      if (!res?.ok) success = false;
+    }
+  }
 
   return success;
 }

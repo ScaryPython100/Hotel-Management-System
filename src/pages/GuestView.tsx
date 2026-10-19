@@ -946,7 +946,7 @@ export default function GuestView() {
 
               <button
                 type="button"
-                onClick={() => handleQuickAction("extension")}
+                onClick={() => handleQuickAction("extend")}
                 className={cn(
                   "py-3.5 px-4 border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs select-none",
                   selectedItems.includes("Request Stay Extension")

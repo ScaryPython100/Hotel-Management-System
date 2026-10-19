@@ -1,5 +1,7 @@
 {
   "rewrites": [
+    { "source": "/api/requests/:id", "destination": "/api/requests?id=:id" },
+    { "source": "/api/borrowed/:id", "destination": "/api/borrowed?id=:id" },
     { "source": "/api/(.*)", "destination": "/api/$1" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
