@@ -39,6 +39,26 @@ function extractBaseApplianceName(name: string): string {
 }
 
 const app = express();
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Guest-submitted requests must never target the reserved settings rows
+function getRequestRejection(providedId: unknown, roomId: unknown): string | null {
+  if (providedId !== undefined && providedId !== null && providedId !== "") {
+    if (typeof providedId !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(providedId)) return "Invalid request id";
+    if (providedId.toLowerCase().startsWith("system-")) return "Invalid request id";
+  }
+  const room = String(roomId ?? "").trim();
+  if (!room || room.toUpperCase() === "SETTINGS" || room.length > 20) return "Invalid room";
+  return null;
+}
 const PORT = 3000;
 
 interface ServerRequest {
@@ -425,13 +445,17 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
   // POST new request
   app.post("/api/requests", async (req, res) => {
-    const { roomId, items, customMessage, status, createdAt, id: providedId, isWaitlist, waitlistForItem, queuePosition } = req.body;
+    const { roomId, items, customMessage, createdAt, id: providedId, isWaitlist, waitlistForItem, queuePosition } = req.body;
+    const rejection = getRequestRejection(providedId, roomId);
+    if (rejection) {
+      return res.status(400).json({ success: false, error: rejection });
+    }
     const newReq: ServerRequest = {
       id: providedId || `srv-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-      roomId: String(roomId || "Unknown"),
+      roomId: String(roomId).trim(),
       items: Array.isArray(items) ? items : [],
       customMessage: customMessage || "",
-      status: status || "pending",
+      status: "pending",
       createdAt: createdAt || Date.now(),
       isWaitlist: Boolean(isWaitlist),
       waitlistForItem: waitlistForItem || undefined,
@@ -636,17 +660,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     const newRelayCount = (Number(currentRelayCount) || 0) + 1;
     const now = Date.now();
 
-    // 1. Mark source borrowed record as returned in memory
-    if (sourceBorrowedId) {
-      const src = serverBorrowed.find(b => b.id === sourceBorrowedId);
-      if (src) {
-        src.status = "returned";
-        src.returnedAt = now;
-      }
-      markBorrowedReturnedInSupabase(sourceBorrowedId).catch(e => console.warn("[SUPABASE] Relay mark returned error:", e));
-    }
-
-    // 2. Create new active borrowed item for target room
+    // 1. Create new active borrowed item for target room
     const newBorrowedItem: BorrowedRecord = {
       id: `borrowed-${now}-${Math.random().toString(36).substr(2, 6)}`,
       roomId: String(targetRoomId),
@@ -659,7 +673,17 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
     };
 
     serverBorrowed.unshift(newBorrowedItem);
-    saveBorrowedToSupabase(newBorrowedItem).catch(e => console.warn("[SUPABASE] Relay save new borrowed error:", e));
+    await saveBorrowedToSupabase(newBorrowedItem).catch(e => console.warn("[SUPABASE] Relay save new borrowed error:", e));
+
+    // 2. Mark source borrowed record as returned in memory
+    if (sourceBorrowedId) {
+      const src = serverBorrowed.find(b => b.id === sourceBorrowedId);
+      if (src) {
+        src.status = "returned";
+        src.returnedAt = now;
+      }
+      markBorrowedReturnedInSupabase(sourceBorrowedId).catch(e => console.warn("[SUPABASE] Relay mark returned error:", e));
+    }
 
     // 3. Complete target waitlist request
     if (targetRequestId) {
@@ -1046,12 +1070,13 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
       `${dashboardUrl}\n\n` +
       `---\nHues Stay Automated Concierge System`;
 
+    const htmlRoom = escapeHtml(roomNumber);
     const htmlContent = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>New Guest Request - Room ${roomNumber}</title>
+  <title>New Guest Request - Room ${htmlRoom}</title>
   <style type="text/css">
     body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
     table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
@@ -1091,7 +1116,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
                       <tr>
                         <td align="left">
                           <span style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: #8C857D; font-weight: 700; display: block; margin-bottom: 2px;">ROOM NUMBER</span>
-                          <span style="font-size: 26px; font-weight: 700; color: #2D2926; font-family: Georgia, 'Times New Roman', serif;">Room ${roomNumber}</span>
+                          <span style="font-size: 26px; font-weight: 700; color: #2D2926; font-family: Georgia, 'Times New Roman', serif;">Room ${htmlRoom}</span>
                         </td>
                         <td align="right" valign="bottom">
                           <span style="font-size: 11px; color: #8C857D; font-family: monospace; background: #FFFFFF; border: 1px solid #E5E1DB; padding: 4px 8px; border-radius: 3px; display: inline-block;">
@@ -1115,7 +1140,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
                     ${items.map(item => `
                       <tr>
                         <td style="background-color: #FAF8F5; border: 1px solid #EBE7E1; padding: 12px 16px; border-radius: 4px; font-size: 14px; color: #2D2926; font-weight: 500;">
-                          <span style="color: #A68966; font-weight: bold; margin-right: 8px;">✓</span> ${item}
+                          <span style="color: #A68966; font-weight: bold; margin-right: 8px;">✓</span> ${escapeHtml(item)}
                         </td>
                       </tr>
                     `).join('')}
@@ -1135,7 +1160,7 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
                   </span>
                   <div style="background-color: #FFFDF9; border: 1px solid #EAD8C3; border-radius: 4px; padding: 16px;">
                     <p style="margin: 0; font-size: 14px; line-height: 1.5; color: #2D2926; font-style: italic;">
-                      "${customMessage}"
+                      "${escapeHtml(customMessage)}"
                     </p>
                   </div>
                 </div>
@@ -1444,15 +1469,6 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
   });
 
   // Diagnostic Endpoint: Trigger a test email
-  app.post("/api/email/test", async (req, res) => {
-    const testResult = await sendStaffEmailAlert({
-      roomNumber: "101",
-      items: ["Water Glasses (Qty: 2)", "Kettle", "Soap Refill"],
-      customMessage: "This is a test notification from Hues Stay Settings to verify email routing."
-    });
-
-    res.json(testResult);
-  });
 
 
   // Vite middleware for development

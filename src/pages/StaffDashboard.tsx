@@ -497,7 +497,10 @@ export default function StaffDashboard() {
     );
 
     // Call live relay function (syncs Supabase and server API)
-    await relayLiveBorrowedItem(sourceBorrowedId, sourceRoom, targetRoom, cleanItemName, targetRequestId, currentRelayCount);
+    const relayed = await relayLiveBorrowedItem(sourceBorrowedId, sourceRoom, targetRoom, cleanItemName, targetRequestId, currentRelayCount);
+    if (!relayed) {
+      toast.error(`Relay of ${cleanItemName} to Room ${targetRoom} did not fully save. Please refresh and check the borrowed items.`, { duration: 8000 });
+    }
     syncInventoryAvailability(nextBorrowed, updatedRequests).catch(() => {});
   };
 
