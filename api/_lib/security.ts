@@ -9,8 +9,9 @@ export function getSupabaseConfig() {
   return { url, serviceKey, anonKey };
 }
 
-function getLinkSecret(): string | null {
-  const secret = process.env.ROOM_LINK_SECRET?.trim();
+// Server-only secret for signing superhost sessions (never sent to the browser)
+function getSigningSecret(): string | null {
+  const secret = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY)?.trim();
   return secret && secret.length >= 16 ? secret : null;
 }
 
@@ -26,34 +27,14 @@ function safeEqual(a: string, b: string): boolean {
 
 const ROOM_PATTERN = /^[A-Za-z0-9-]{1,20}$/;
 
-/** Plain room-number links (/room/101) keep working only while this is "true" */
-export function allowRoomNumberLinks(): boolean {
-  return process.env.ALLOW_ROOM_NUMBER_LINKS?.trim().toLowerCase() === "true";
-}
-
-/** Signed QR link value for a room, e.g. "101.Xk2…". Null when ROOM_LINK_SECRET is missing. */
-export function createRoomToken(room: string): string | null {
-  const secret = getLinkSecret();
-  if (!secret || !ROOM_PATTERN.test(room)) return null;
-  return `${room}.${sign(`room:${room}`, secret)}`;
-}
-
-/** Room number for a QR link value, or null if it is not valid */
+/**
+ * Room number from a room link. QR codes in the rooms open /room/<room number>,
+ * so the link value is the room number itself.
+ */
 export function resolveRoomToken(token: unknown): string | null {
   const value = String(token ?? "").trim();
-  if (!value) return null;
-
-  const dot = value.lastIndexOf(".");
-  if (dot > 0) {
-    const room = value.slice(0, dot);
-    const secret = getLinkSecret();
-    if (!secret || !ROOM_PATTERN.test(room)) return null;
-    return safeEqual(value.slice(dot + 1), sign(`room:${room}`, secret)) ? room : null;
-  }
-
-  // Legacy printed QR codes: /room/101
-  if (allowRoomNumberLinks() && /^\d{2,4}$/.test(value)) return value;
-  return null;
+  if (!ROOM_PATTERN.test(value) || value.toUpperCase() === "SETTINGS") return null;
+  return value;
 }
 
 /** Signed-in staff member for this request (Supabase Auth bearer token), or null */
@@ -86,14 +67,14 @@ const SUPERHOST_SESSION_MS = 12 * 60 * 60 * 1000;
 
 /** Short-lived proof that this staff member entered the superhost PIN */
 export function createSuperhostToken(now = Date.now()): string | null {
-  const secret = getLinkSecret();
+  const secret = getSigningSecret();
   if (!secret) return null;
   const expires = String(now + SUPERHOST_SESSION_MS);
   return `${expires}.${sign(`superhost:${expires}`, secret)}`;
 }
 
 export function verifySuperhostToken(token: unknown, now = Date.now()): boolean {
-  const secret = getLinkSecret();
+  const secret = getSigningSecret();
   const value = String(token ?? "");
   const dot = value.indexOf(".");
   if (!secret || dot < 1) return false;

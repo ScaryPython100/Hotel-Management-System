@@ -5,7 +5,6 @@ import borrowedHandler from "../../api/borrowed";
 import guestHandler from "../../api/guest";
 import staffHandler from "../../api/staff";
 import {
-  createRoomToken,
   resolveRoomToken,
   createSuperhostToken,
   verifySuperhostToken,
@@ -52,9 +51,7 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "mock-service-key";
   process.env.SUPABASE_ANON_KEY = "mock-anon-key";
   process.env.RESEND_API_KEY = "re_mock_key";
-  process.env.ROOM_LINK_SECRET = "test-room-link-secret-123";
   process.env.SUPERHOST_PIN = "4321";
-  delete process.env.ALLOW_ROOM_NUMBER_LINKS;
   delete process.env.RESEND_TO_EMAILS;
   delete process.env.APP_URL;
   resetDedupCachesForTesting();
@@ -68,26 +65,16 @@ afterEach(() => {
 const resendCalls = () => calls.filter(c => c.url.includes("api.resend.com"));
 const dbCalls = () => calls.filter(c => c.url.includes("/rest/v1/"));
 const supabaseWrites = (method: string) => dbCalls().filter(c => c.init?.method === method);
-const roomToken = (room: string) => createRoomToken(room) as string;
+// QR codes in the rooms open /room/<room number>
+const roomToken = (room: string) => room;
 
 describe("room links and superhost tokens", () => {
-  it("accepts signed links and rejects tampered ones", () => {
-    const token = roomToken("101");
-    assert.equal(resolveRoomToken(token), "101");
-    assert.equal(resolveRoomToken(token.replace("101.", "102.")), null);
-    assert.equal(resolveRoomToken("101.not-a-signature"), null);
-  });
-
-  it("accepts plain room numbers only in legacy mode", () => {
-    assert.equal(resolveRoomToken("101"), null);
-    process.env.ALLOW_ROOM_NUMBER_LINKS = "true";
+  it("uses the room number from the printed QR link", () => {
     assert.equal(resolveRoomToken("101"), "101");
+    assert.equal(resolveRoomToken(" 204 "), "204");
     assert.equal(resolveRoomToken("SETTINGS"), null);
-  });
-
-  it("creates no links without a long enough secret", () => {
-    process.env.ROOM_LINK_SECRET = "short";
-    assert.equal(createRoomToken("101"), null);
+    assert.equal(resolveRoomToken("../101"), null);
+    assert.equal(resolveRoomToken(""), null);
   });
 
   it("expires superhost tokens", () => {
@@ -121,13 +108,13 @@ describe("api/requests helpers", () => {
 describe("POST /api/requests", () => {
   it("rejects requests without a valid room link", async () => {
     const res = mockRes();
-    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "req-1", roomId: "101", items: ["Kettle"] } }, res);
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "req-1", roomToken: "SETTINGS", items: ["Kettle"] } }, res);
     assert.equal(res.statusCode, 403);
     assert.equal(dbCalls().length, 0);
     assert.equal(resendCalls().length, 0);
   });
 
-  it("takes the room from the signed link, not the body", async () => {
+  it("takes the room from the room link and always starts as pending", async () => {
     const res = mockRes();
     await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "req-1", roomId: "999", roomToken: roomToken("101"), items: ["Kettle"], status: "completed" } }, res);
     assert.equal(res.statusCode, 200);
@@ -204,7 +191,7 @@ describe("GET/PATCH/DELETE /api/requests", () => {
 describe("GET /api/guest", () => {
   it("rejects unknown room links", async () => {
     const res = mockRes();
-    await guestHandler({ method: "GET", query: { token: "101" }, headers: {} }, res);
+    await guestHandler({ method: "GET", query: { token: "SETTINGS" }, headers: {} }, res);
     assert.equal(res.statusCode, 404);
   });
 
@@ -238,7 +225,7 @@ describe("/api/staff", () => {
     assert.equal(res.statusCode, 401);
   });
 
-  it("issues room links only after the superhost PIN", async () => {
+  it("checks the superhost PIN on the server", async () => {
     const wrong = mockRes();
     await staffHandler({ method: "POST", query: { action: "verify-pin" }, headers: STAFF_HEADERS, body: { pin: "0000" } }, wrong);
     assert.equal(wrong.statusCode, 403);
@@ -246,15 +233,7 @@ describe("/api/staff", () => {
     const pin = mockRes();
     await staffHandler({ method: "POST", query: { action: "verify-pin" }, headers: STAFF_HEADERS, body: { pin: "4321" } }, pin);
     assert.equal(pin.statusCode, 200);
-
-    const noToken = mockRes();
-    await staffHandler({ method: "GET", query: { action: "room-links", rooms: "101" }, headers: STAFF_HEADERS }, noToken);
-    assert.equal(noToken.statusCode, 403);
-
-    const links = mockRes();
-    await staffHandler({ method: "GET", query: { action: "room-links", rooms: "101,102" }, headers: { ...STAFF_HEADERS, "x-superhost-token": pin.body.superhostToken } }, links);
-    assert.equal(links.statusCode, 200);
-    assert.equal(resolveRoomToken(links.body.links["102"]), "102");
+    assert.equal(verifySuperhostToken(pin.body.superhostToken), true);
   });
 });
 

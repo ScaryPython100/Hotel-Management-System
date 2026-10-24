@@ -10,7 +10,7 @@ export default async function handler(req: any, res: any) {
 
   const room = resolveRoomToken(req.query?.token);
   if (!room) {
-    return res.status(404).json({ success: false, error: "Unknown room link", allowRoomNumbers: false });
+    return res.status(404).json({ success: false, error: "Unknown room link" });
   }
 
   const { url, serviceKey } = getSupabaseConfig();

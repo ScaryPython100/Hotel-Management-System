@@ -335,8 +335,8 @@ function isAuthorizedSuperhost(req: express.Request): boolean {
 async function startServer() {
   app.use(express.json());
 
-  // The same handlers that run on Vercel, so local behaviour (staff sign-in, signed room
-  // links) matches production. Registered first, so they take precedence over the older
+  // The same handlers that run on Vercel, so local behaviour (staff sign-in, guest
+  // endpoints) matches production. Registered first, so they take precedence over the older
   // dev-only routes for these paths below.
   const withPathId = (handler: (req: any, res: any) => any) => (req: express.Request, res: express.Response) => {
     (req.query as any).id = req.params.id;

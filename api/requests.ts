@@ -131,7 +131,7 @@ export default async function handler(req: any, res: any) {
     }
 
     const { roomToken, roomId, items, customMessage, createdAt, id: providedId, isWaitlist, waitlistForItem, queuePosition } = req.body || {};
-    // The room comes from the signed QR link; plain room numbers only work in legacy mode
+    // The room comes from the QR link (/room/<room number>)
     const rawRoomId = resolveRoomToken(roomToken ?? roomId);
     if (!rawRoomId) {
       return res.status(403).json({ success: false, error: "Invalid room link. Please scan the QR code in your room." });

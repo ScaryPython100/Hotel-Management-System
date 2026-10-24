@@ -66,7 +66,7 @@ function rememberRoomLink(link: string, room: string) {
 export default function GuestView() {
   const { hash } = useParams<{ hash: string }>();
 
-  // The signed link from the QR code identifies the room; the server confirms it
+  // The room number from the QR code link; the server confirms it
   const [roomLink, setRoomLink] = useState<string | null>(hash?.trim() || null);
   const [roomNumber, setRoomNumber] = useState<string | null>(() => readKnownRoomLink(hash?.trim()));
   const [manualRoomInput, setManualRoomInput] = useState("");
