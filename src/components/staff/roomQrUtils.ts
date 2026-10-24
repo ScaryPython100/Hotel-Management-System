@@ -1,44 +1,9 @@
-import { Room, DEFAULT_ROOMS } from "../../types";
+import { Room } from "../../types";
 import { toast } from "sonner";
 
-// Safe merger that NEVER drops default or existing rooms
-export function mergeRoomsWithDefaults(incomingRooms: Room[] = []): Room[] {
-  const map = new Map<string, Room>();
-
-  // 1. Add all standard 22 rooms first
-  DEFAULT_ROOMS.forEach(r => {
-    map.set(r.roomNumber, { ...r });
-  });
-
-  // 2. Add or override with any stored / incoming rooms
-  incomingRooms.forEach(r => {
-    if (r && r.roomNumber) {
-      map.set(r.roomNumber, {
-        id: r.id || `room-${r.roomNumber}`,
-        roomNumber: String(r.roomNumber),
-        qrCodeHash: String(r.qrCodeHash || r.roomNumber),
-        status: r.status || "vacant"
-      });
-    }
-  });
-
-  // 3. Filter out explicitly user-deleted rooms
-  try {
-    const deletedList: string[] = JSON.parse(localStorage.getItem("hues_stay_deleted_rooms") || "[]");
-    deletedList.forEach(num => map.delete(num));
-  } catch (e) {}
-
-  return Array.from(map.values()).sort((a, b) =>
-    a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true })
-  );
-}
-
-export function getSuperhostPinHeader(): Record<string, string> {
-  let pin = "9999";
-  try {
-    pin = localStorage.getItem("hues_stay_superhost_pin") || "9999";
-  } catch (e) {}
-  return { "x-superhost-pin": pin.trim() };
+/** Rooms sorted naturally (101, 102, ..., 1001) */
+export function sortRooms(rooms: Room[]): Room[] {
+  return [...rooms].sort((a, b) => a.roomNumber.localeCompare(b.roomNumber, undefined, { numeric: true }));
 }
 
 export function printRoomQR(room: Room) {

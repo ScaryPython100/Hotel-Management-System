@@ -1,6 +1,26 @@
 import React, { useState } from "react";
 import { X, Lock } from "lucide-react";
 import { toast } from "sonner";
+import { staffApiFetch } from "../lib/supabaseClient";
+
+const SUPERHOST_TOKEN_KEY = "hues_superhost_token";
+
+/** Proof from the server that the superhost PIN was entered (expires after 12 hours) */
+export function getSuperhostToken(): string | null {
+  try {
+    const token = sessionStorage.getItem(SUPERHOST_TOKEN_KEY);
+    const expires = Number(token?.split(".")[0]);
+    return token && expires > Date.now() ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearSuperhostToken() {
+  try {
+    sessionStorage.removeItem(SUPERHOST_TOKEN_KEY);
+  } catch {}
+}
 
 interface PinAuthModalProps {
   isOpen: boolean;
@@ -10,21 +30,33 @@ interface PinAuthModalProps {
 
 export default function PinAuthModal({ isOpen, onClose, onSuccess }: PinAuthModalProps) {
   const [pin, setPin] = useState("");
+  const [isChecking, setIsChecking] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const correctPin = localStorage.getItem("hues_stay_superhost_pin") || "9999";
-
-    if (pin.trim() === correctPin) {
-      toast.success("Superhost access granted");
-      onSuccess();
-      onClose();
+    setIsChecking(true);
+    try {
+      // The PIN is checked on the server (SUPERHOST_PIN), so it is the same on every device
+      const res = await staffApiFetch("/api/staff?action=verify-pin", {
+        method: "POST",
+        body: JSON.stringify({ pin: pin.trim() })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.superhostToken) {
+        sessionStorage.setItem(SUPERHOST_TOKEN_KEY, data.superhostToken);
+        toast.success("Superhost access granted");
+        onSuccess();
+        onClose();
+      } else {
+        toast.error(res.status === 403 ? "Incorrect PIN. Please try again." : (data.error || "Could not check the PIN."));
+      }
+    } catch {
+      toast.error("Could not reach the server to check the PIN.");
+    } finally {
       setPin("");
-    } else {
-      toast.error("Incorrect PIN. Please try again.");
-      setPin("");
+      setIsChecking(false);
     }
   };
 
@@ -65,6 +97,7 @@ export default function PinAuthModal({ isOpen, onClose, onSuccess }: PinAuthModa
 
           <button
             type="submit"
+            disabled={isChecking}
             className="w-full py-3.5 bg-[#2D2926] text-white text-xs uppercase tracking-[0.2em] font-medium hover:bg-black transition-colors"
           >
             Unlock Superhost

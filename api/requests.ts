@@ -1,3 +1,5 @@
+import { getStaffUser, resolveRoomToken } from "./_lib/security.js";
+
 // In-memory deduplication cache across invocations within the same instance
 const DEDUP_WINDOW_MS = 3 * 60 * 1000;
 const MAX_DEDUP_ENTRIES = 500;
@@ -64,118 +66,15 @@ function getRecipientList(): string[] {
   return ["huesstay@gmail.com"];
 }
 
-const TARGET_AUTO_ITEMS = [
-  "Iron Box",
-  "Kettle",
-  "Hair Dryer",
-  "Laptop Table",
-  "Hot Pack",
-  "Set of Plates",
-  "Set of Cups/Bowls",
-  "Set of Glasses",
-  "Empty Water Bottle",
-  "Cooking Oil Dispenser",
-  "Leg Massager (Paid)",
-  "Glasses (Set of 2)",
-  "USB 3.0 Cable + Adaptor",
-  "Infrared Heat Therapy Lamp (Paid)"
-];
-
-// Releases items that an older build auto-marked out of service; stock limits are enforced by the clients
-async function reconcileServerlessInventory(supabaseUrl: string, supabaseKey: string) {
-  try {
-    const headers = {
-      "apikey": supabaseKey,
-      "Authorization": `Bearer ${supabaseKey}`
-    };
-
-    const [settingsRes, autoDepletedRes] = await Promise.all([
-      fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-amenities-settings-global`, { headers }),
-      fetch(`${supabaseUrl}/rest/v1/guest_requests?id=eq.system-auto-depleted-items`, { headers })
-    ]);
-
-    const settingsRows: any[] = settingsRes.ok ? await settingsRes.json().catch(() => []) : [];
-    const autoDepletedRows: any[] = autoDepletedRes.ok ? await autoDepletedRes.json().catch(() => []) : [];
-
-    let amenityStatus: Record<string, string> = {};
-    if (settingsRows[0]?.custom_message) {
-      try {
-        amenityStatus = JSON.parse(settingsRows[0].custom_message);
-      } catch (e) {}
-    }
-
-    let autoDepleted: string[] = [];
-    if (autoDepletedRows[0]?.custom_message) {
-      try {
-        const parsed = JSON.parse(autoDepletedRows[0].custom_message);
-        if (Array.isArray(parsed)) autoDepleted = parsed;
-      } catch (e) {}
-    }
-    const autoDepletedSet = new Set<string>(autoDepleted);
-    let autoDepletedChanged = false;
-
-    let hasChanged = false;
-    for (const item of TARGET_AUTO_ITEMS) {
-      if (autoDepletedSet.has(item)) {
-        autoDepletedSet.delete(item);
-        autoDepletedChanged = true;
-        if (amenityStatus[item] === "out_of_service") {
-          amenityStatus[item] = "available";
-          hasChanged = true;
-        }
-      }
-    }
-
-    if (autoDepletedChanged) {
-      await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
-        method: "POST",
-        headers: {
-          ...headers,
-          "Content-Type": "application/json",
-          "Prefer": "resolution=merge-duplicates"
-        },
-        body: JSON.stringify({
-          id: "system-auto-depleted-items",
-          room_id: "SETTINGS",
-          items: [],
-          custom_message: JSON.stringify(Array.from(autoDepletedSet)),
-          status: "completed",
-          created_at: 0,
-          updated_at: new Date().toISOString()
-        })
-      }).catch(() => {});
-    }
-
-    if (hasChanged) {
-      await fetch(`${supabaseUrl}/rest/v1/guest_requests`, {
-        method: "POST",
-        headers: {
-          ...headers,
-          "Content-Type": "application/json",
-          "Prefer": "resolution=merge-duplicates"
-        },
-        body: JSON.stringify({
-          id: "system-amenities-settings-global",
-          room_id: "SETTINGS",
-          items: [],
-          custom_message: JSON.stringify(amenityStatus),
-          status: "completed",
-          created_at: 0,
-          updated_at: new Date().toISOString()
-        })
-      });
-    }
-  } catch (err: any) {
-    console.warn("[INVENTORY RECONCILE] Error:", err?.message);
-  }
-}
-
 export default async function handler(req: any, res: any) {
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
-  const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY)?.trim();
+  const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY)?.trim();
 
   // GET requests from Supabase
   if (req.method === 'GET') {
+    if (!(await getStaffUser(req))) {
+      return res.status(401).json({ success: false, error: "Staff sign-in required" });
+    }
     if (!supabaseUrl || !supabaseKey) {
       return res.status(200).json({ success: true, requests: [], source: "memory" });
     }
@@ -231,8 +130,12 @@ export default async function handler(req: any, res: any) {
       return res.status(404).json({ success: false, error: "Not found" });
     }
 
-    const { roomId, roomNumber, room_id, items, customMessage, createdAt, id: providedId, isWaitlist, waitlistForItem, queuePosition } = req.body || {};
-    const rawRoomId = roomId || roomNumber || room_id;
+    const { roomToken, roomId, items, customMessage, createdAt, id: providedId, isWaitlist, waitlistForItem, queuePosition } = req.body || {};
+    // The room comes from the signed QR link; plain room numbers only work in legacy mode
+    const rawRoomId = resolveRoomToken(roomToken ?? roomId);
+    if (!rawRoomId) {
+      return res.status(403).json({ success: false, error: "Invalid room link. Please scan the QR code in your room." });
+    }
     const rejection = getRequestRejection(providedId, rawRoomId);
     if (rejection) {
       return res.status(400).json({ success: false, error: rejection });
@@ -386,10 +289,6 @@ export default async function handler(req: any, res: any) {
     }
 
     // Awaited: serverless functions may be frozen as soon as the response is sent
-    if (supabaseUrl && supabaseKey) {
-      await reconcileServerlessInventory(supabaseUrl, supabaseKey);
-    }
-
     const responseRequest = {
       id: newReq.id,
       roomId: newReq.room_id,
@@ -411,6 +310,22 @@ export default async function handler(req: any, res: any) {
     const id = req.query?.id || req.body?.id;
     if (!id) return res.status(400).json({ error: "Missing ID" });
     if (String(id).startsWith("system-")) return res.status(400).json({ error: "Invalid ID" });
+
+    const isStaff = Boolean(await getStaffUser(req));
+    if (!isStaff) {
+      // Guests may only cancel a pending request from their own room
+      const guestRoom = req.method === 'DELETE' ? resolveRoomToken(req.headers?.["x-room-token"]) : null;
+      if (!guestRoom || !supabaseUrl || !supabaseKey) {
+        return res.status(401).json({ success: false, error: "Staff sign-in required" });
+      }
+      const lookup = await fetch(`${supabaseUrl}/rest/v1/guest_requests?select=room_id,status&id=eq.${encodeURIComponent(id)}`, {
+        headers: { "apikey": supabaseKey, "Authorization": `Bearer ${supabaseKey}` }
+      });
+      const rows: any[] = lookup.ok ? await lookup.json() : [];
+      if (!rows[0] || String(rows[0].room_id) !== guestRoom || rows[0].status !== "pending") {
+        return res.status(403).json({ success: false, error: "This request cannot be cancelled from this room" });
+      }
+    }
 
     let patch: Record<string, any>;
     if (req.method === 'PATCH') {
@@ -434,7 +349,6 @@ export default async function handler(req: any, res: any) {
           },
           body: JSON.stringify(patch)
         });
-        await reconcileServerlessInventory(supabaseUrl, supabaseKey);
         if (!resp.ok) {
           return res.status(502).json({ success: false, error: `Supabase returned status ${resp.status}` });
         }

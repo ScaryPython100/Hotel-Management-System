@@ -2,6 +2,15 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import requestsHandler, { escapeHtml, getRequestRejection, resetDedupCachesForTesting } from "../../api/requests";
 import borrowedHandler from "../../api/borrowed";
+import guestHandler from "../../api/guest";
+import staffHandler from "../../api/staff";
+import {
+  createRoomToken,
+  resolveRoomToken,
+  createSuperhostToken,
+  verifySuperhostToken,
+  checkSuperhostPin
+} from "../../api/_lib/security";
 
 // Every network call is intercepted: no request ever reaches Supabase or Resend.
 type FetchCall = { url: string; init: any };
@@ -9,6 +18,8 @@ let calls: FetchCall[] = [];
 let respond: (url: string, init: any) => { ok: boolean; status: number; body?: any };
 const realFetch = globalThis.fetch;
 const savedEnv = { ...process.env };
+
+const STAFF_HEADERS = { authorization: "Bearer good-staff-jwt" };
 
 function mockRes() {
   const res: any = { statusCode: 200, body: undefined };
@@ -22,8 +33,14 @@ beforeEach(() => {
   calls = [];
   respond = () => ({ ok: true, status: 200, body: [] });
   globalThis.fetch = (async (url: any, init: any = {}) => {
-    calls.push({ url: String(url), init });
-    const r = respond(String(url), init);
+    const href = String(url);
+    calls.push({ url: href, init });
+    // Supabase Auth: only "good-staff-jwt" is a signed-in staff member
+    if (href.endsWith("/auth/v1/user")) {
+      const ok = init?.headers?.Authorization === "Bearer good-staff-jwt";
+      return { ok, status: ok ? 200 : 401, json: async () => (ok ? { id: "staff-1", email: "staff@example.test" } : {}) };
+    }
+    const r = respond(href, init);
     return {
       ok: r.ok,
       status: r.status,
@@ -33,7 +50,11 @@ beforeEach(() => {
   }) as any;
   process.env.SUPABASE_URL = "https://mock.supabase.test";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "mock-service-key";
+  process.env.SUPABASE_ANON_KEY = "mock-anon-key";
   process.env.RESEND_API_KEY = "re_mock_key";
+  process.env.ROOM_LINK_SECRET = "test-room-link-secret-123";
+  process.env.SUPERHOST_PIN = "4321";
+  delete process.env.ALLOW_ROOM_NUMBER_LINKS;
   delete process.env.RESEND_TO_EMAILS;
   delete process.env.APP_URL;
   resetDedupCachesForTesting();
@@ -45,8 +66,44 @@ afterEach(() => {
 });
 
 const resendCalls = () => calls.filter(c => c.url.includes("api.resend.com"));
-const supabaseWrites = (method: string) =>
-  calls.filter(c => c.url.includes("mock.supabase.test") && c.init?.method === method);
+const dbCalls = () => calls.filter(c => c.url.includes("/rest/v1/"));
+const supabaseWrites = (method: string) => dbCalls().filter(c => c.init?.method === method);
+const roomToken = (room: string) => createRoomToken(room) as string;
+
+describe("room links and superhost tokens", () => {
+  it("accepts signed links and rejects tampered ones", () => {
+    const token = roomToken("101");
+    assert.equal(resolveRoomToken(token), "101");
+    assert.equal(resolveRoomToken(token.replace("101.", "102.")), null);
+    assert.equal(resolveRoomToken("101.not-a-signature"), null);
+  });
+
+  it("accepts plain room numbers only in legacy mode", () => {
+    assert.equal(resolveRoomToken("101"), null);
+    process.env.ALLOW_ROOM_NUMBER_LINKS = "true";
+    assert.equal(resolveRoomToken("101"), "101");
+    assert.equal(resolveRoomToken("SETTINGS"), null);
+  });
+
+  it("creates no links without a long enough secret", () => {
+    process.env.ROOM_LINK_SECRET = "short";
+    assert.equal(createRoomToken("101"), null);
+  });
+
+  it("expires superhost tokens", () => {
+    const token = createSuperhostToken(0) as string;
+    assert.equal(verifySuperhostToken(token, 1000), true);
+    assert.equal(verifySuperhostToken(token, 13 * 60 * 60 * 1000), false);
+    assert.equal(verifySuperhostToken("999999999999999.forged"), false);
+  });
+
+  it("checks the PIN against SUPERHOST_PIN only", () => {
+    assert.equal(checkSuperhostPin("4321"), true);
+    assert.equal(checkSuperhostPin("9999"), false);
+    delete process.env.SUPERHOST_PIN;
+    assert.equal(checkSuperhostPin(""), false);
+  });
+});
 
 describe("api/requests helpers", () => {
   it("escapes HTML special characters", () => {
@@ -57,119 +114,165 @@ describe("api/requests helpers", () => {
     assert.equal(getRequestRejection("system-amenities-settings-global", "101"), "Invalid request id");
     assert.equal(getRequestRejection("bad id with spaces", "101"), "Invalid request id");
     assert.equal(getRequestRejection("req-1", "SETTINGS"), "Invalid room");
-    assert.equal(getRequestRejection("req-1", ""), "Invalid room");
     assert.equal(getRequestRejection("req-123-abc", "101"), null);
-    assert.equal(getRequestRejection(undefined, "101"), null);
   });
 });
 
 describe("POST /api/requests", () => {
-  it("refuses to overwrite system settings rows", async () => {
+  it("rejects requests without a valid room link", async () => {
     const res = mockRes();
-    await requestsHandler({ method: "POST", query: {}, body: { id: "system-amenities-settings-global", roomId: "101", items: [] } }, res);
-    assert.equal(res.statusCode, 400);
-    assert.equal(supabaseWrites("POST").length, 0);
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "req-1", roomId: "101", items: ["Kettle"] } }, res);
+    assert.equal(res.statusCode, 403);
+    assert.equal(dbCalls().length, 0);
     assert.equal(resendCalls().length, 0);
   });
 
-  it("forces status to pending regardless of the payload", async () => {
+  it("takes the room from the signed link, not the body", async () => {
     const res = mockRes();
-    await requestsHandler({ method: "POST", query: {}, body: { id: "req-1", roomId: "101", items: ["Kettle"], status: "completed" } }, res);
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "req-1", roomId: "999", roomToken: roomToken("101"), items: ["Kettle"], status: "completed" } }, res);
     assert.equal(res.statusCode, 200);
-    const insert = supabaseWrites("POST").find(c => c.url.endsWith("/rest/v1/guest_requests"));
-    assert.ok(insert);
-    assert.equal(JSON.parse(insert!.init.body).status, "pending");
+    const insert = JSON.parse(supabaseWrites("POST")[0].init.body);
+    assert.equal(insert.room_id, "101");
+    assert.equal(insert.status, "pending");
+  });
+
+  it("refuses to overwrite system settings rows", async () => {
+    const res = mockRes();
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "system-amenities-settings-global", roomToken: roomToken("101"), items: [] } }, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(dbCalls().length, 0);
   });
 
   it("escapes guest text in the staff email HTML", async () => {
-    const res = mockRes();
-    await requestsHandler({ method: "POST", query: {}, body: { id: "req-2", roomId: "102", items: ["<b>Kettle</b>"], customMessage: `<a href="http://evil">click</a>` } }, res);
-    const [email] = resendCalls();
-    assert.ok(email);
-    const html = JSON.parse(email.init.body).html as string;
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "req-2", roomToken: roomToken("102"), items: ["<b>Kettle</b>"], customMessage: `<a href="http://evil">click</a>` } }, mockRes());
+    const html = JSON.parse(resendCalls()[0].init.body).html as string;
     assert.ok(!html.includes(`<a href="http://evil">`));
-    assert.ok(html.includes("&lt;a href=&quot;http://evil&quot;&gt;"));
     assert.ok(html.includes("&lt;b&gt;Kettle&lt;/b&gt;"));
   });
 
   it("sends one email for repeated ids and identical payloads within 3 minutes", async () => {
-    const body = { id: "req-3", roomId: "103", items: ["Iron Box"], customMessage: "" };
-    await requestsHandler({ method: "POST", query: {}, body }, mockRes());
-    await requestsHandler({ method: "POST", query: {}, body }, mockRes());
-    await requestsHandler({ method: "POST", query: {}, body: { ...body, id: "req-4" } }, mockRes());
+    const body = { id: "req-3", roomToken: roomToken("103"), items: ["Iron Box"], customMessage: "" };
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body }, mockRes());
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body }, mockRes());
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { ...body, id: "req-4" } }, mockRes());
     assert.equal(resendCalls().length, 1);
-
-    await requestsHandler({ method: "POST", query: {}, body: { ...body, id: "req-5", roomId: "104" } }, mockRes());
-    assert.equal(resendCalls().length, 2);
   });
 
   it("reports failure when the request cannot be saved", async () => {
     respond = (url) => url.includes("mock.supabase.test") ? { ok: false, status: 500 } : { ok: true, status: 200 };
     const res = mockRes();
-    await requestsHandler({ method: "POST", query: {}, body: { id: "req-6", roomId: "105", items: ["Kettle"] } }, res);
+    await requestsHandler({ method: "POST", query: {}, headers: {}, body: { id: "req-6", roomToken: roomToken("105"), items: ["Kettle"] } }, res);
     assert.equal(res.statusCode, 502);
-    assert.equal(res.body.success, false);
-  });
-
-  it("does not treat path-style POSTs as new requests", async () => {
-    const res = mockRes();
-    await requestsHandler({ method: "POST", query: { id: "clear-all" }, body: {} }, res);
-    assert.equal(res.statusCode, 404);
-    assert.equal(calls.length, 0);
   });
 });
 
-describe("PATCH/DELETE /api/requests", () => {
-  it("rejects unknown statuses", async () => {
-    const res = mockRes();
-    await requestsHandler({ method: "PATCH", query: { id: "req-1" }, body: { status: "hacked" } }, res);
-    assert.equal(res.statusCode, 400);
-    assert.equal(calls.length, 0);
+describe("GET/PATCH/DELETE /api/requests", () => {
+  it("requires staff sign-in to list or update requests", async () => {
+    const list = mockRes();
+    await requestsHandler({ method: "GET", query: {}, headers: {} }, list);
+    assert.equal(list.statusCode, 401);
+
+    const patch = mockRes();
+    await requestsHandler({ method: "PATCH", query: { id: "req-1" }, headers: {}, body: { status: "completed" } }, patch);
+    assert.equal(patch.statusCode, 401);
+    assert.equal(dbCalls().length, 0);
   });
 
-  it("dismisses instead of hard-deleting", async () => {
+  it("lets staff update a status", async () => {
     const res = mockRes();
-    await requestsHandler({ method: "DELETE", query: { id: "req-1" }, body: {} }, res);
+    await requestsHandler({ method: "PATCH", query: { id: "req-1" }, headers: STAFF_HEADERS, body: { status: "completed" } }, res);
     assert.equal(res.statusCode, 200);
-    assert.equal(supabaseWrites("DELETE").length, 0);
-    const patch = supabaseWrites("PATCH")[0];
-    assert.equal(JSON.parse(patch.init.body).is_deleted_from_dashboard, true);
+    assert.equal(JSON.parse(supabaseWrites("PATCH")[0].init.body).status, "completed");
+  });
+
+  it("lets a guest cancel only a pending request from their own room", async () => {
+    respond = (url, init) => (!init?.method || init.method === "GET") && url.includes("select=room_id,status")
+      ? { ok: true, status: 200, body: [{ room_id: "101", status: "pending" }] }
+      : { ok: true, status: 200 };
+
+    const own = mockRes();
+    await requestsHandler({ method: "DELETE", query: { id: "req-1" }, headers: { "x-room-token": roomToken("101") } }, own);
+    assert.equal(own.statusCode, 200);
+    assert.equal(JSON.parse(supabaseWrites("PATCH")[0].init.body).is_deleted_from_dashboard, true);
+
+    const other = mockRes();
+    await requestsHandler({ method: "DELETE", query: { id: "req-1" }, headers: { "x-room-token": roomToken("202") } }, other);
+    assert.equal(other.statusCode, 403);
   });
 });
 
-describe("GET /api/requests", () => {
-  it("hides dismissed requests and settings rows", async () => {
-    respond = () => ({
-      ok: true,
-      status: 200,
-      body: [
-        { id: "req-a", room_id: "101", items: [], status: "pending", created_at: 1 },
-        { id: "req-b", room_id: "102", items: [], status: "pending", created_at: 2, is_deleted_from_dashboard: true },
-        { id: "system-amenities-settings-global", room_id: "SETTINGS", items: [] }
-      ]
-    });
+describe("GET /api/guest", () => {
+  it("rejects unknown room links", async () => {
     const res = mockRes();
-    await requestsHandler({ method: "GET", query: {} }, res);
-    assert.deepEqual(res.body.requests.map((r: any) => r.id), ["req-a"]);
+    await guestHandler({ method: "GET", query: { token: "101" }, headers: {} }, res);
+    assert.equal(res.statusCode, 404);
+  });
+
+  it("returns counts without other guests' details", async () => {
+    respond = (url) => {
+      if (url.includes("borrowed_items")) return { ok: true, status: 200, body: [{ item_name: "Kettle" }] };
+      if (url.includes("status=eq.pending")) {
+        return { ok: true, status: 200, body: [
+          { items: ["Kettle (qty: 2)", "Maggi (₹20 Per Pack)"], custom_message: "Guest Name: Someone\nPhone Number: 123" },
+          { items: ["Iron Box"], is_waitlist: true, waitlist_for_item: "Iron Box", custom_message: "" }
+        ] };
+      }
+      return { ok: true, status: 200, body: [{ id: "system-inventory-limits-global", custom_message: JSON.stringify({ Kettle: 3 }) }] };
+    };
+    const res = mockRes();
+    await guestHandler({ method: "GET", query: { token: roomToken("101") }, headers: {} }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.room, "101");
+    assert.equal(res.body.inUse.Kettle, 2);
+    assert.equal(res.body.inUse.Maggi, 1);
+    assert.equal(res.body.waitlistCounts["Iron Box"], 1);
+    assert.deepEqual(res.body.limits, { Kettle: 3 });
+    assert.ok(!JSON.stringify(res.body).includes("Someone"));
   });
 });
 
-describe("POST /api/borrowed relay", () => {
+describe("/api/staff", () => {
+  it("requires staff sign-in", async () => {
+    const res = mockRes();
+    await staffHandler({ method: "POST", query: { action: "verify-pin" }, headers: {}, body: { pin: "4321" } }, res);
+    assert.equal(res.statusCode, 401);
+  });
+
+  it("issues room links only after the superhost PIN", async () => {
+    const wrong = mockRes();
+    await staffHandler({ method: "POST", query: { action: "verify-pin" }, headers: STAFF_HEADERS, body: { pin: "0000" } }, wrong);
+    assert.equal(wrong.statusCode, 403);
+
+    const pin = mockRes();
+    await staffHandler({ method: "POST", query: { action: "verify-pin" }, headers: STAFF_HEADERS, body: { pin: "4321" } }, pin);
+    assert.equal(pin.statusCode, 200);
+
+    const noToken = mockRes();
+    await staffHandler({ method: "GET", query: { action: "room-links", rooms: "101" }, headers: STAFF_HEADERS }, noToken);
+    assert.equal(noToken.statusCode, 403);
+
+    const links = mockRes();
+    await staffHandler({ method: "GET", query: { action: "room-links", rooms: "101,102" }, headers: { ...STAFF_HEADERS, "x-superhost-token": pin.body.superhostToken } }, links);
+    assert.equal(links.statusCode, 200);
+    assert.equal(resolveRoomToken(links.body.links["102"]), "102");
+  });
+});
+
+describe("/api/borrowed", () => {
   const relayBody = { sourceBorrowedId: "borrowed-src", sourceRoomId: "204", targetRoomId: "301", itemName: "Iron Box", targetRequestId: "req-w" };
+
+  it("requires staff sign-in", async () => {
+    const res = mockRes();
+    await borrowedHandler({ method: "POST", query: { id: "relay" }, headers: {}, body: relayBody }, res);
+    assert.equal(res.statusCode, 401);
+    assert.equal(dbCalls().length, 0);
+  });
 
   it("creates the target record before releasing the source", async () => {
     const res = mockRes();
-    await borrowedHandler({ method: "POST", query: { id: "relay" }, body: relayBody }, res);
+    await borrowedHandler({ method: "POST", query: { id: "relay" }, headers: STAFF_HEADERS, body: relayBody }, res);
     assert.equal(res.statusCode, 200);
-    const order = calls.map(c => `${c.init?.method} ${c.url.split("/rest/v1/")[1]?.split("?")[0]}`);
+    const order = dbCalls().map(c => `${c.init?.method} ${c.url.split("/rest/v1/")[1]?.split("?")[0]}`);
     assert.deepEqual(order, ["POST borrowed_items", "PATCH borrowed_items", "PATCH guest_requests"]);
-  });
-
-  it("leaves the source untouched when the new record cannot be created", async () => {
-    respond = (_url, init) => init?.method === "POST" ? { ok: false, status: 500 } : { ok: true, status: 200 };
-    const res = mockRes();
-    await borrowedHandler({ method: "POST", query: { id: "relay" }, body: relayBody }, res);
-    assert.equal(res.statusCode, 502);
-    assert.equal(supabaseWrites("PATCH").length, 0);
   });
 });

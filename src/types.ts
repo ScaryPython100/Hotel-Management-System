@@ -114,67 +114,14 @@ export const COMMON_ITEMS: AmenityItem[] = [
   ...PAGE_3_QUICK_FOOD_ITEMS
 ];
 
-export const TARGET_AUTO_UNAVAILABLE_ITEMS = [
-  "Iron Box",
-  "Kettle",
-  "Hair Dryer",
-  "Laptop Table",
-  "Hot Pack",
-  "Set of Plates",
-  "Set of Cups/Bowls",
-  "Set of Glasses",
-  "Empty Water Bottle",
-  "Cooking Oil Dispenser",
-  "Maggi",
-  "Eggs",
-  "Coffee Sachet",
-  "Soft Drinks (300mL)",
-  "Toned Milk",
-  "Masala Box",
-  // Backward compatibility:
-  "Maggi (₹20)",
-  "Eggs (₹10)",
-  "Coffee Sachet (₹5 per sachet)",
-  "Soft Drinks (₹50)",
-  "Toned Milk 200/500 mL (₹30)",
-  "Masala Box (₹50)",
-  "Leg Massager (Paid)",
-  "Glasses (Set of 2)",
-  "USB 3.0 Cable + Adaptor",
-  "Infrared Heat Therapy Lamp (Paid)"
-] as const;
+// Items with a stock limit: they become unavailable when every unit is in use
+export const TARGET_AUTO_UNAVAILABLE_ITEMS: readonly string[] = COMMON_ITEMS
+  .filter(i => i.isLimited)
+  .map(i => i.name);
 
-export type TargetAutoUnavailableItem = typeof TARGET_AUTO_UNAVAILABLE_ITEMS[number];
-
-export const DEFAULT_INVENTORY_LIMITS: Record<string, number> = {
-  "Iron Box": 1,
-  "Kettle": 5,
-  "Hair Dryer": 2,
-  "Laptop Table": 2,
-  "Hot Pack": 2,
-  "Set of Plates": 10,
-  "Set of Cups/Bowls": 10,
-  "Set of Glasses": 10,
-  "Empty Water Bottle": 5,
-  "Cooking Oil Dispenser": 5,
-  "Maggi": 20,
-  "Eggs": 30,
-  "Coffee Sachet": 50,
-  "Soft Drinks (300mL)": 20,
-  "Toned Milk": 15,
-  "Masala Box": 5,
-  // Backward compatibility:
-  "Maggi (₹20)": 20,
-  "Eggs (₹10)": 30,
-  "Coffee Sachet (₹5 per sachet)": 50,
-  "Soft Drinks (₹50)": 20,
-  "Toned Milk 200/500 mL (₹30)": 15,
-  "Masala Box (₹50)": 5,
-  "Leg Massager (Paid)": 1,
-  "Glasses (Set of 2)": 10,
-  "USB 3.0 Cable + Adaptor": 2,
-  "Infrared Heat Therapy Lamp (Paid)": 1
-};
+export const DEFAULT_INVENTORY_LIMITS: Record<string, number> = Object.fromEntries(
+  COMMON_ITEMS.filter(i => i.isLimited).map(i => [i.name, i.defaultLimit || 1])
+);
 
 export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_service'> = {
   "Extra Person (w/ or w/o Mattress) (₹500/-)": "available",
@@ -204,14 +151,7 @@ export const DEFAULT_AMENITY_STATUS: Record<string, 'available' | 'out_of_servic
   "Toned Milk": "available",
   "Toned Milk - 200 mL": "available",
   "Toned Milk - 500 mL": "available",
-  "Masala Box": "available",
-  // Backward compatibility:
-  "Maggi (₹20)": "available",
-  "Eggs (₹10)": "available",
-  "Coffee Sachet (₹5 per sachet)": "available",
-  "Soft Drinks (₹50)": "available",
-  "Toned Milk 200/500 mL (₹30)": "available",
-  "Masala Box (₹50)": "available"
+  "Masala Box": "available"
 };
 
 export interface InventoryItem {
@@ -300,15 +240,6 @@ export function extractItemQuantity(itemString: string): number {
   return 1;
 }
 
-export function getItemUnitConsumption(itemName: string): number {
-  if (!itemName) return 1;
-  const clean = itemName.toLowerCase().trim();
-  if (clean.includes("glasses (set of 2)") || clean.includes("glasses") || clean.includes("glass")) {
-    return 2;
-  }
-  return 1;
-}
-
 export function normalizeReturnableName(rawName: string): string {
   const base = extractBaseItemName(rawName).trim();
   const lower = base.toLowerCase();
@@ -316,16 +247,12 @@ export function normalizeReturnableName(rawName: string): string {
   if (lower.includes("iron")) return "Iron Box";
   if (lower.includes("hair dryer") || lower.includes("dryer")) return "Hair Dryer";
   if (lower.includes("laptop")) return "Laptop Table";
-  if (lower.includes("hot pack") || lower.includes("pack")) return "Hot Pack";
+  if (lower.includes("hot pack")) return "Hot Pack";
   if (lower.includes("plate")) return "Set of Plates";
   if (lower.includes("cup") || lower.includes("bowl")) return "Set of Cups/Bowls";
-  if (lower.includes("glasses (set of 2)") || lower.includes("water glasses") || lower.includes("set of 2")) return "Glasses (Set of 2)";
   if (lower.includes("glass")) return "Set of Glasses";
   if (lower.includes("empty water bottle") || (lower.includes("bottle") && lower.includes("empty"))) return "Empty Water Bottle";
   if (lower.includes("oil dispenser") || lower.includes("cooking oil")) return "Cooking Oil Dispenser";
-  if (lower.includes("massager")) return "Leg Massager (Paid)";
-  if (lower.includes("usb") || lower.includes("cable") || lower.includes("adaptor")) return "USB 3.0 Cable + Adaptor";
-  if (lower.includes("infrared") || lower.includes("therapy lamp") || lower.includes("heat therapy")) return "Infrared Heat Therapy Lamp (Paid)";
   if (lower.includes("maggi")) return "Maggi";
   if (lower.includes("egg")) return "Eggs";
   if (lower.includes("coffee")) return "Coffee Sachet";
@@ -365,20 +292,11 @@ export function isReturnableItem(name: string): boolean {
     clean.includes('laptop table') ||
     clean.includes('laptop') ||
     clean.includes('hot pack') ||
-    clean.includes('pack') ||
     clean.includes('plate') ||
     clean.includes('cup') ||
     clean.includes('bowl') ||
     clean.includes('glass') ||
-    clean.includes('oil dispenser') ||
-    clean.includes('massager') ||
-    clean.includes('adaptor') ||
-    clean.includes('adapter') ||
-    clean.includes('cable') ||
-    clean.includes('usb') ||
-    clean.includes('infrared') ||
-    clean.includes('lamp') ||
-    clean.includes('heat therapy')
+    clean.includes('oil dispenser')
   ) {
     return true;
   }

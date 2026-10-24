@@ -1,314 +1,206 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { 
-  RoomRequest, 
-  BorrowedItem, 
-  TARGET_AUTO_UNAVAILABLE_ITEMS, 
-  DEFAULT_INVENTORY_LIMITS, 
-  DEFAULT_AMENITY_STATUS, 
-  normalizeReturnableName 
-} from "../types";
+import { RoomRequest, BorrowedItem } from "../types";
 
 // Public Supabase credentials from client environment
 const rawMeta = typeof import.meta !== "undefined" ? (import.meta as any).env : {};
 const supabaseUrl = String(rawMeta?.VITE_SUPABASE_URL || "").trim().replace(/\/rest\/v1\/?$/, "");
 const supabaseAnonKey = String(rawMeta?.VITE_SUPABASE_ANON_KEY || "").trim();
 
+// Settings are stored as special rows in guest_requests (staff-only)
+const AMENITY_STATUS_ROW = "system-amenities-settings-global";
+const INVENTORY_LIMITS_ROW = "system-inventory-limits-global";
+const DELETED_ITEMS_ROW = "system-deleted-items";
+const ROOMS_ROW = "system-rooms";
+
 let supabaseClient: SupabaseClient | null = null;
 
+/**
+ * Supabase client for the staff portal. Database access requires a signed-in staff member;
+ * guest pages talk to the /api functions instead.
+ */
 export function getClientSupabase(): SupabaseClient | null {
   if (!supabaseUrl || !supabaseAnonKey) return null;
   if (!supabaseClient) {
     supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
-      auth: { persistSession: false },
+      auth: { persistSession: true, autoRefreshToken: true },
       realtime: { params: { eventsPerSecond: 10 } }
     });
   }
   return supabaseClient;
 }
 
-/**
- * Fetch requests directly from Supabase (works on mobile, laptop, preview URL, and dev)
- */
-export async function fetchLiveRequests(): Promise<RoomRequest[]> {
+/** Calls a staff-only /api endpoint with the signed-in staff member's session */
+export async function staffApiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const sb = getClientSupabase();
-  
-  // Try direct Supabase query first (guaranteed cross-device consistency)
-  if (sb) {
-    try {
-      const { data, error } = await sb
-        .from("guest_requests")
-        .select("*")
-        .order("created_at", { ascending: false });
+  const { data } = sb ? await sb.auth.getSession() : { data: { session: null } };
+  const headers = new Headers(init.headers);
+  if (data.session?.access_token) {
+    headers.set("Authorization", `Bearer ${data.session.access_token}`);
+  }
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  return fetch(path, { ...init, headers });
+}
 
-      if (!error && data && Array.isArray(data)) {
-        const activeRows = data.filter((row: any) => 
-          !row.is_deleted_from_dashboard && 
-          row.room_id !== "SETTINGS" && 
-          !String(row.id || "").startsWith("system-")
-        );
-        return activeRows.map((row: any): RoomRequest => {
-          let isWaitlist = !!row.is_waitlist;
-          let waitlistForItem = row.waitlist_for_item || undefined;
-          let queuePosition = typeof row.queue_position === "number" ? row.queue_position : undefined;
+function mapRequestRow(row: any): RoomRequest {
+  let isWaitlist = !!row.is_waitlist;
+  let waitlistForItem = row.waitlist_for_item || undefined;
+  let queuePosition = typeof row.queue_position === "number" ? row.queue_position : undefined;
 
-          const msg = String(row.custom_message || "");
-          if (!isWaitlist && msg.startsWith("[WAITLIST:")) {
-            isWaitlist = true;
-            const match = msg.match(/\[WAITLIST:\s*([^\]#]+)(?:#(\d+))?\]/i);
-            if (match) {
-              waitlistForItem = match[1]?.trim();
-              if (match[2]) queuePosition = parseInt(match[2], 10);
-            }
-          }
-
-          return {
-            id: row.id,
-            roomId: String(row.room_id),
-            qrCodeHash: String(row.room_id),
-            items: Array.isArray(row.items) ? row.items : [],
-            customMessage: row.custom_message || "",
-            status: row.status === "completed" ? "completed" : "pending",
-            createdAt: Number(row.created_at) || Date.now(),
-            isWaitlist,
-            waitlistForItem,
-            queuePosition
-          };
-        });
-      }
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Direct fetch requests fallback to API:", err);
+  const msg = String(row.custom_message || "");
+  if (!isWaitlist && msg.startsWith("[WAITLIST:")) {
+    isWaitlist = true;
+    const match = msg.match(/\[WAITLIST:\s*([^\]#]+)(?:#(\d+))?\]/i);
+    if (match) {
+      waitlistForItem = match[1]?.trim();
+      if (match[2]) queuePosition = parseInt(match[2], 10);
     }
   }
 
-  // Fallback to server API
-  try {
-    const res = await fetch("/api/requests");
-    if (res.ok) {
-      const json = await res.json();
-      if (json.requests && Array.isArray(json.requests)) {
-        return json.requests;
-      }
-    }
-  } catch (err) {
-    console.warn("[API] Fetch requests error:", err);
-  }
+  return {
+    id: row.id,
+    roomId: String(row.room_id),
+    qrCodeHash: String(row.room_id),
+    items: Array.isArray(row.items) ? row.items : [],
+    customMessage: row.custom_message || "",
+    status: row.status === "completed" ? "completed" : "pending",
+    createdAt: Number(row.created_at) || Date.now(),
+    isWaitlist,
+    waitlistForItem,
+    queuePosition
+  };
+}
 
-  return [];
+function mapBorrowedRow(row: any): BorrowedItem {
+  return {
+    id: row.id,
+    roomId: String(row.room_id),
+    itemName: row.item_name,
+    status: row.status === "returned" ? "returned" : "borrowed",
+    createdAt: Number(row.created_at) || Date.now(),
+    returnedAt: row.returned_at ? new Date(row.returned_at).getTime() : undefined,
+    relayedFromRoom: row.relayed_from_room || undefined,
+    relayCount: typeof row.relay_count === "number" ? row.relay_count : undefined
+  };
 }
 
 /**
- * Fetch borrowed items directly from Supabase (works on mobile, laptop, preview URL, and dev)
+ * Active guest requests (dismissed requests and settings rows are excluded)
  */
-export async function fetchLiveBorrowed(): Promise<BorrowedItem[]> {
+export async function fetchLiveRequests(): Promise<RoomRequest[] | null> {
   const sb = getClientSupabase();
-
-  if (sb) {
-    try {
-      const { data, error } = await sb
-        .from("borrowed_items")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (!error && data && Array.isArray(data)) {
-        return data.map((row: any): BorrowedItem => ({
-          id: row.id,
-          roomId: String(row.room_id),
-          itemName: row.item_name,
-          status: row.status === "returned" ? "returned" : "borrowed",
-          createdAt: Number(row.created_at) || Date.now(),
-          returnedAt: row.returned_at ? new Date(row.returned_at).getTime() : undefined,
-          relayedFromRoom: row.relayed_from_room || undefined,
-          relayCount: typeof row.relay_count === "number" ? row.relay_count : undefined
-        }));
-      }
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Direct fetch borrowed fallback to API:", err);
-    }
-  }
-
-  // Fallback to server API
+  if (!sb) return null;
   try {
-    const res = await fetch("/api/borrowed");
-    if (res.ok) {
-      const json = await res.json();
-      if (json.items && Array.isArray(json.items)) {
-        return json.items;
-      }
-    }
+    const { data, error } = await sb
+      .from("guest_requests")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error || !Array.isArray(data)) return null;
+    return data
+      .filter((row: any) =>
+        !row.is_deleted_from_dashboard &&
+        row.room_id !== "SETTINGS" &&
+        !String(row.id || "").startsWith("system-")
+      )
+      .map(mapRequestRow);
   } catch (err) {
-    console.warn("[API] Fetch borrowed error:", err);
+    console.warn("[SUPABASE] Fetch requests error:", err);
+    return null;
   }
-
-  return [];
 }
 
-/**
- * Update request status directly in Supabase + notify server API
- */
+export async function fetchLiveBorrowed(): Promise<BorrowedItem[] | null> {
+  const sb = getClientSupabase();
+  if (!sb) return null;
+  try {
+    const { data, error } = await sb
+      .from("borrowed_items")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error || !Array.isArray(data)) return null;
+    return data.map(mapBorrowedRow);
+  } catch (err) {
+    console.warn("[SUPABASE] Fetch borrowed error:", err);
+    return null;
+  }
+}
+
 export async function updateLiveRequestStatus(id: string, status: "pending" | "completed"): Promise<boolean> {
-  let success = false;
   const sb = getClientSupabase();
-
-  if (sb) {
-    try {
-      const { error } = await sb
-        .from("guest_requests")
-        .update({ status, updated_at: new Date().toISOString() })
-        .eq("id", id);
-      if (!error) success = true;
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Update request status error:", err);
-    }
-  }
-
-  // Also notify server API non-blockingly
-  fetch(`/api/requests/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status })
-  }).catch(() => {});
-
-  return success;
+  if (!sb) return false;
+  const { error } = await sb
+    .from("guest_requests")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) console.warn("[SUPABASE] Update request status error:", error.message);
+  return !error;
 }
 
 /**
- * Mark borrowed item as returned directly in Supabase + notify server API
- */
-export async function markLiveBorrowedReturned(id: string): Promise<boolean> {
-  let success = false;
-  const sb = getClientSupabase();
-
-  if (sb) {
-    try {
-      const { error } = await sb
-        .from("borrowed_items")
-        .update({ status: "returned", returned_at: new Date().toISOString() })
-        .eq("id", id);
-      if (!error) success = true;
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Mark borrowed returned error:", err);
-    }
-  }
-
-  // Also notify server API non-blockingly
-  fetch(`/api/borrowed/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status: "returned" })
-  }).catch(() => {});
-
-  return success;
-}
-
-/**
- * Delete borrowed item directly in Supabase + notify server API
- */
-export async function deleteLiveBorrowed(id: string): Promise<boolean> {
-  let success = false;
-  const sb = getClientSupabase();
-
-  if (sb) {
-    try {
-      const { error } = await sb
-        .from("borrowed_items")
-        .delete()
-        .eq("id", id);
-      if (!error) success = true;
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Delete borrowed error:", err);
-    }
-  }
-
-  fetch(`/api/borrowed/${id}`, { method: "DELETE" }).catch(() => {});
-  return success;
-}
-
-/**
- * Mark request as dismissed from dashboard in Supabase + notify server API
+ * Hide a request from the dashboard. The record stays in the database.
  */
 export async function dismissLiveRequest(id: string): Promise<boolean> {
-  let success = false;
   const sb = getClientSupabase();
-
-  if (sb) {
-    try {
-      const { error } = await sb
-        .from("guest_requests")
-        .update({
-          is_deleted_from_dashboard: true,
-          deleted_at: Date.now(),
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", id);
-      if (!error) success = true;
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Dismiss request error:", err);
-    }
-  }
-
-  fetch(`/api/requests/${id}`, { method: "DELETE" }).catch(() => {});
-  return success;
+  if (!sb) return false;
+  const { error } = await sb
+    .from("guest_requests")
+    .update({
+      is_deleted_from_dashboard: true,
+      deleted_at: Date.now(),
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", id);
+  if (error) console.warn("[SUPABASE] Dismiss request error:", error.message);
+  return !error;
 }
 
-/**
- * Upsert a borrowed item directly in Supabase (falls back to base columns on older schemas)
- */
-async function upsertBorrowedDirect(sb: SupabaseClient, item: BorrowedItem): Promise<boolean> {
-  try {
-    const payload: any = {
-      id: item.id,
-      room_id: String(item.roomId),
-      item_name: item.itemName,
-      status: item.status,
-      created_at: item.createdAt || Date.now(),
-      returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null,
-      relayed_from_room: item.relayedFromRoom || null,
-      relay_count: item.relayCount || 0
-    };
-    let { error } = await sb
-      .from("borrowed_items")
-      .upsert(payload, { onConflict: "id" });
-
-    if (error && (error.message?.includes("column") || error.code === "PGRST204" || error.code === "42703")) {
-      console.warn("[CLIENT SUPABASE] Borrowed table lacks relay columns, falling back to base columns");
-      const basePayload = {
-        id: item.id,
-        room_id: String(item.roomId),
-        item_name: item.itemName,
-        status: item.status,
-        created_at: item.createdAt || Date.now(),
-        returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null
-      };
-      const retry = await sb.from("borrowed_items").upsert(basePayload, { onConflict: "id" });
-      error = retry.error;
-    }
-
-    if (error) console.warn("[CLIENT SUPABASE] Save borrowed error:", error.message);
-    return !error;
-  } catch (err) {
-    console.warn("[CLIENT SUPABASE] Save borrowed error:", err);
-    return false;
-  }
+export async function markLiveBorrowedReturned(id: string): Promise<boolean> {
+  const sb = getClientSupabase();
+  if (!sb) return false;
+  const { error } = await sb
+    .from("borrowed_items")
+    .update({ status: "returned", returned_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) console.warn("[SUPABASE] Mark returned error:", error.message);
+  return !error;
 }
 
-/**
- * Save newly borrowed item directly to Supabase + notify server API
- */
+export async function deleteLiveBorrowed(id: string): Promise<boolean> {
+  const sb = getClientSupabase();
+  if (!sb) return false;
+  const { error } = await sb.from("borrowed_items").delete().eq("id", id);
+  if (error) console.warn("[SUPABASE] Delete borrowed error:", error.message);
+  return !error;
+}
+
 export async function saveLiveBorrowed(item: BorrowedItem): Promise<boolean> {
   const sb = getClientSupabase();
-  const success = sb ? await upsertBorrowedDirect(sb, item) : false;
+  if (!sb) return false;
+  const payload = {
+    id: item.id,
+    room_id: String(item.roomId),
+    item_name: item.itemName,
+    status: item.status,
+    created_at: item.createdAt || Date.now(),
+    returned_at: item.returnedAt ? new Date(item.returnedAt).toISOString() : null
+  };
+  let { error } = await sb.from("borrowed_items").upsert({
+    ...payload,
+    relayed_from_room: item.relayedFromRoom || null,
+    relay_count: item.relayCount || 0
+  }, { onConflict: "id" });
 
-  fetch("/api/borrowed", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(item)
-  }).catch(() => {});
-
-  return success;
+  // Older databases may not have the relay columns yet
+  if (error && (error.message?.includes("column") || error.code === "PGRST204" || error.code === "42703")) {
+    ({ error } = await sb.from("borrowed_items").upsert(payload, { onConflict: "id" }));
+  }
+  if (error) console.warn("[SUPABASE] Save borrowed error:", error.message);
+  return !error;
 }
 
 /**
- * Floor-to-Floor Relay: hands off an appliance from Room A to Room B.
+ * Floor-to-Floor Relay: hands an appliance from Room A straight to Room B.
  * The new record is written before the source is released, so a failure never loses the item.
  */
 export async function relayLiveBorrowedItem(
@@ -319,9 +211,7 @@ export async function relayLiveBorrowedItem(
   targetRequestId?: string,
   currentRelayCount?: number
 ): Promise<boolean> {
-  const sb = getClientSupabase();
-  const newRelayCount = (currentRelayCount || 0) + 1;
-  const newBorrowed: BorrowedItem = {
+  const inserted = await saveLiveBorrowed({
     id: `borrowed-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
     roomId: String(targetRoomId),
     itemName,
@@ -329,512 +219,101 @@ export async function relayLiveBorrowedItem(
     createdAt: Date.now(),
     requestId: targetRequestId,
     relayedFromRoom: String(sourceRoomId),
-    relayCount: newRelayCount
-  };
-
-  // 1. Insert new borrowed item for target room
-  const inserted = sb ? await upsertBorrowedDirect(sb, newBorrowed) : false;
-
-  if (!inserted) {
-    // Nothing was written directly, so let the server perform the whole relay
-    try {
-      const res = await fetch("/api/borrowed/relay", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sourceBorrowedId,
-          sourceRoomId,
-          targetRoomId,
-          itemName,
-          targetRequestId,
-          currentRelayCount
-        })
-      });
-      return res.ok;
-    } catch (err) {
-      console.warn("[API] Relay borrowed error:", err);
-      return false;
-    }
-  }
+    relayCount: (currentRelayCount || 0) + 1
+  });
+  if (!inserted) return false;
 
   let success = true;
-
-  // 2. Mark source item returned
   if (sourceBorrowedId) {
-    const { error } = await sb!
-      .from("borrowed_items")
-      .update({ status: "returned", returned_at: new Date().toISOString() })
-      .eq("id", sourceBorrowedId);
-    if (error) {
-      console.warn("[CLIENT SUPABASE] Relay mark source returned error:", error.message);
-      const res = await fetch(`/api/borrowed/${sourceBorrowedId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "returned" })
-      }).catch(() => null);
-      if (!res?.ok) success = false;
-    }
+    success = (await markLiveBorrowedReturned(sourceBorrowedId)) && success;
   }
-
-  // 3. Complete target request if provided
   if (targetRequestId) {
-    const { error } = await sb!
-      .from("guest_requests")
-      .update({ status: "completed", updated_at: new Date().toISOString() })
-      .eq("id", targetRequestId);
-    if (error) {
-      console.warn("[CLIENT SUPABASE] Relay complete request error:", error.message);
-      const res = await fetch(`/api/requests/${targetRequestId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "completed" })
-      }).catch(() => null);
-      if (!res?.ok) success = false;
-    }
+    success = (await updateLiveRequestStatus(targetRequestId, "completed")) && success;
   }
-
   return success;
 }
 
 /**
- * Fetch global amenities status directly from Supabase (instant cross-device sync)
- */
-export async function fetchLiveAmenitiesStatus(): Promise<Record<string, 'available' | 'out_of_service'> | null> {
-  const sb = getClientSupabase();
-  if (sb) {
-    try {
-      const { data, error } = await sb
-        .from("guest_requests")
-        .select("custom_message")
-        .eq("id", "system-amenities-settings-global")
-        .single();
-
-      if (!error && data && data.custom_message) {
-        const parsed = JSON.parse(data.custom_message);
-        if (parsed && typeof parsed === "object") {
-          return parsed;
-        }
-      }
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Direct fetch amenities fallback to API:", err);
-    }
-  }
-
-  // Fallback to server API
-  try {
-    const res = await fetch("/api/settings/amenities");
-    if (res.ok) {
-      const json = await res.json();
-      if (json.success && json.amenities) {
-        return json.amenities;
-      }
-    }
-  } catch (err) {
-    console.warn("[API] Fetch amenities fallback error:", err);
-  }
-
-  return null;
-}
-
-/**
- * Save global amenities status directly to Supabase + notify server API
- */
-export async function saveLiveAmenitiesStatus(status: Record<string, 'available' | 'out_of_service'>): Promise<boolean> {
-  let success = false;
-  const sb = getClientSupabase();
-
-  if (sb) {
-    try {
-      const { error } = await sb
-        .from("guest_requests")
-        .upsert({
-          id: "system-amenities-settings-global",
-          room_id: "SETTINGS",
-          items: [],
-          custom_message: JSON.stringify(status),
-          status: "completed",
-          created_at: 0
-        }, { onConflict: "id" });
-
-      if (!error) {
-        success = true;
-      } else {
-        console.warn("[CLIENT SUPABASE] Upsert amenities error:", error.message);
-      }
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Save amenities exception:", err);
-    }
-  }
-
-  // Also notify server API non-blockingly to update server cache & file
-  fetch("/api/settings/amenities", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ amenities: status })
-  }).catch(() => {});
-
-  // Also sync to Firestore non-blockingly so Firestore real-time listeners trigger instantly
-  try {
-    import("./firebase").then(({ db }) => {
-      import("firebase/firestore").then(({ doc, setDoc }) => {
-        setDoc(doc(db, "settings", "amenities"), status, { merge: true }).catch(() => {});
-      });
-    }).catch(() => {});
-  } catch (e) {}
-
-  return success;
-}
-
-/**
- * Permanently clear all requests and borrowed items from Supabase, server API, and local state
+ * Permanently delete all requests and borrowed items (settings rows are kept)
  */
 export async function clearAllLiveRequests(): Promise<boolean> {
   const sb = getClientSupabase();
-  if (sb) {
-    try {
-      await sb.from("guest_requests").delete().neq("room_id", "SETTINGS");
-      await sb.from("borrowed_items").delete().neq("id", "none_placeholder_never_matches");
-      await saveLiveDismissedRequests([]);
-    } catch (e) {
-      console.warn("[CLIENT SUPABASE] Clear error:", e);
-    }
-  }
-  try {
-    localStorage.removeItem("hues_stay_dismissed_requests");
-  } catch (e) {}
-
-  try {
-    const res = await fetch("/api/requests/clear-all", { method: "POST" });
-    return res.ok;
-  } catch (e) {
-    return false;
-  }
+  if (!sb) return false;
+  const [reqRes, borRes] = await Promise.all([
+    sb.from("guest_requests").delete().neq("room_id", "SETTINGS"),
+    sb.from("borrowed_items").delete().neq("id", "")
+  ]);
+  return !reqRes.error && !borRes.error;
 }
 
-/**
- * Fetch global inventory limits directly from Supabase
- */
-export async function fetchLiveInventoryLimits(): Promise<Record<string, number> | null> {
+async function readSettingsRow<T>(id: string): Promise<T | null> {
   const sb = getClientSupabase();
-  if (sb) {
-    try {
-      const { data, error } = await sb
-        .from("guest_requests")
-        .select("custom_message")
-        .eq("id", "system-inventory-limits-global")
-        .single();
-
-      if (!error && data && data.custom_message) {
-        const parsed = JSON.parse(data.custom_message);
-        if (parsed && typeof parsed === "object") {
-          return parsed;
-        }
-      }
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Direct fetch limits fallback:", err);
-    }
-  }
-  return null;
-}
-
-/**
- * Save global inventory limits directly to Supabase
- */
-export async function saveLiveInventoryLimits(limits: Record<string, number>): Promise<boolean> {
-  let success = false;
-  const sb = getClientSupabase();
-  if (sb) {
-    try {
-      const { error } = await sb
-        .from("guest_requests")
-        .upsert({
-          id: "system-inventory-limits-global",
-          room_id: "SETTINGS",
-          items: [],
-          custom_message: JSON.stringify(limits),
-          status: "completed",
-          created_at: 0
-        }, { onConflict: "id" });
-      if (!error) success = true;
-    } catch (err) {
-      console.warn("[CLIENT SUPABASE] Save limits error:", err);
-    }
-  }
-  return success;
-}
-
-/**
- * Fetch list of items automatically depleted by inventory
- */
-export async function fetchLiveAutoDepleted(): Promise<string[]> {
-  const sb = getClientSupabase();
-  if (sb) {
-    try {
-      const { data, error } = await sb
-        .from("guest_requests")
-        .select("custom_message")
-        .eq("id", "system-auto-depleted-items")
-        .single();
-      if (!error && data && data.custom_message) {
-        const parsed = JSON.parse(data.custom_message);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {}
-  }
+  if (!sb) return null;
   try {
-    const saved = localStorage.getItem("hues_stay_auto_depleted");
-    if (saved) return JSON.parse(saved);
-  } catch (e) {}
-  return [];
+    const { data, error } = await sb
+      .from("guest_requests")
+      .select("custom_message")
+      .eq("id", id)
+      .maybeSingle();
+    if (error || !data?.custom_message) return null;
+    const parsed = JSON.parse(data.custom_message);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (err) {
+    console.warn(`[SUPABASE] Read ${id} error:`, err);
+    return null;
+  }
 }
 
-/**
- * Save list of items automatically depleted by inventory
- */
-export async function saveLiveAutoDepleted(items: string[]): Promise<boolean> {
-  try {
-    localStorage.setItem("hues_stay_auto_depleted", JSON.stringify(items));
-  } catch (e) {}
+async function writeSettingsRow(id: string, value: unknown): Promise<boolean> {
   const sb = getClientSupabase();
-  if (sb) {
-    try {
-      await sb
-        .from("guest_requests")
-        .upsert({
-          id: "system-auto-depleted-items",
-          room_id: "SETTINGS",
-          items: [],
-          custom_message: JSON.stringify(items),
-          status: "completed",
-          created_at: 0
-        }, { onConflict: "id" });
-      return true;
-    } catch (e) {}
-  }
-  return false;
+  if (!sb) return false;
+  const { error } = await sb.from("guest_requests").upsert({
+    id,
+    room_id: "SETTINGS",
+    items: [],
+    custom_message: JSON.stringify(value),
+    status: "completed",
+    created_at: 0,
+    updated_at: new Date().toISOString()
+  }, { onConflict: "id" });
+  if (error) console.warn(`[SUPABASE] Save ${id} error:`, error.message);
+  return !error;
 }
 
-/**
- * Fetch list of dismissed/cleared request IDs directly from Supabase (instant cross-device sync)
- */
-export async function fetchLiveDismissedRequests(): Promise<string[]> {
-  const sb = getClientSupabase();
-  if (sb) {
-    try {
-      const { data, error } = await sb
-        .from("guest_requests")
-        .select("custom_message")
-        .eq("id", "system-dismissed-requests-global")
-        .single();
-      if (!error && data && data.custom_message) {
-        const parsed = JSON.parse(data.custom_message);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {}
-  }
-  try {
-    const saved = localStorage.getItem("hues_stay_dismissed_requests");
-    if (saved) return JSON.parse(saved);
-  } catch (e) {}
-  return [];
+/** Items (and sub-items like "Soft Drinks - Coke") that staff marked out of service */
+export function fetchLiveAmenitiesStatus() {
+  return readSettingsRow<Record<string, 'available' | 'out_of_service'>>(AMENITY_STATUS_ROW);
 }
 
-/**
- * Save list of dismissed/cleared request IDs directly to Supabase so ALL devices clear them instantly
- */
-export async function saveLiveDismissedRequests(ids: string[]): Promise<boolean> {
-  try {
-    localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(ids));
-  } catch (e) {}
-  const sb = getClientSupabase();
-  if (sb) {
-    try {
-      await sb
-        .from("guest_requests")
-        .upsert({
-          id: "system-dismissed-requests-global",
-          room_id: "SETTINGS",
-          items: [],
-          custom_message: JSON.stringify(ids),
-          status: "completed",
-          created_at: 0,
-          updated_at: new Date().toISOString()
-        }, { onConflict: "id" });
-      return true;
-    } catch (e) {}
-  }
-  return false;
+export function saveLiveAmenitiesStatus(status: Record<string, 'available' | 'out_of_service'>) {
+  return writeSettingsRow(AMENITY_STATUS_ROW, status);
 }
 
-/**
- * Fetch permanently deleted items from Supabase
- */
-export async function fetchLiveDeletedItems(): Promise<string[]> {
-  const sb = getClientSupabase();
-  if (sb) {
-    try {
-      const { data, error } = await sb
-        .from("guest_requests")
-        .select("custom_message")
-        .eq("id", "system-deleted-items")
-        .single();
-      if (!error && data && data.custom_message) {
-        const parsed = JSON.parse(data.custom_message);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {}
-  }
-  try {
-    const saved = localStorage.getItem("hues_stay_deleted_items");
-    if (saved) return JSON.parse(saved);
-  } catch (e) {}
-  return [];
+/** Stock counts that staff changed in Settings */
+export function fetchLiveInventoryLimits() {
+  return readSettingsRow<Record<string, number>>(INVENTORY_LIMITS_ROW);
 }
 
-/**
- * Save permanently deleted items to Supabase so they are excluded across all devices
- */
-export async function saveLiveDeletedItems(items: string[]): Promise<boolean> {
-  try {
-    localStorage.setItem("hues_stay_deleted_items", JSON.stringify(items));
-  } catch (e) {}
-  const sb = getClientSupabase();
-  if (sb) {
-    try {
-      await sb
-        .from("guest_requests")
-        .upsert({
-          id: "system-deleted-items",
-          room_id: "SETTINGS",
-          items: [],
-          custom_message: JSON.stringify(items),
-          status: "completed",
-          created_at: 0,
-          updated_at: new Date().toISOString()
-        }, { onConflict: "id" });
-      return true;
-    } catch (e) {}
-  }
-  return false;
+export function saveLiveInventoryLimits(limits: Record<string, number>) {
+  return writeSettingsRow(INVENTORY_LIMITS_ROW, limits);
 }
 
-/**
- * Synchronize amenity availability for the 8 target items based on live inventory limits and active in-use items.
- * An item automatically becomes 'out_of_service' when active borrowed items + pending requests >= inventory limit.
- * It automatically returns to 'available' when items are returned ONLY IF it was automatically depleted.
- * Manual settings by the owner/staff are NEVER overwritten.
- */
-export async function syncInventoryAvailability(
-  borrowedList?: BorrowedItem[],
-  requestsList?: RoomRequest[],
-  customLimits?: Record<string, number>
-): Promise<Record<string, 'available' | 'out_of_service'>> {
-  const sb = getClientSupabase();
-
-  // 1. Fetch live borrowed if not provided
-  let activeBorrowed = borrowedList;
-  if (!activeBorrowed && sb) {
-    activeBorrowed = await fetchLiveBorrowed();
-  }
-  const borrowed = (activeBorrowed || []).filter(b => b.status === "borrowed");
-
-  // 2. Fetch live requests if not provided
-  let liveReqs = requestsList;
-  if (!liveReqs && sb) {
-    liveReqs = await fetchLiveRequests();
-  }
-  const pending = (liveReqs || []).filter(r => r.status === "pending");
-
-  // 3. Resolve inventory limits
-  const limits: Record<string, number> = {
-    ...DEFAULT_INVENTORY_LIMITS,
-    ...(customLimits || {})
-  };
-
-  try {
-    const savedLimits = localStorage.getItem("hues_stay_inventory_limits");
-    if (savedLimits) {
-      Object.assign(limits, JSON.parse(savedLimits));
-    }
-  } catch (e) {}
-
-  const liveLimits = await fetchLiveInventoryLimits();
-  if (liveLimits) {
-    Object.assign(limits, liveLimits);
-    try {
-      localStorage.setItem("hues_stay_inventory_limits", JSON.stringify(limits));
-    } catch (e) {}
-  }
-
-  // 4. Resolve current amenity availability status
-  let currentStatus: Record<string, 'available' | 'out_of_service'> = { ...DEFAULT_AMENITY_STATUS };
-  try {
-    const saved = localStorage.getItem("hues_stay_amenities");
-    if (saved) {
-      Object.assign(currentStatus, JSON.parse(saved));
-    }
-  } catch (e) {}
-
-  const liveStatus = await fetchLiveAmenitiesStatus();
-  if (liveStatus) {
-    Object.assign(currentStatus, liveStatus);
-  }
-
-  // 5. Fetch auto-depleted items (items marked out of service strictly by inventory limit)
-  const autoDepleted = await fetchLiveAutoDepleted();
-  const autoDepletedSet = new Set<string>(autoDepleted);
-
-  // 6. Pre-aggregate borrowed and pending counts in a single pass (avoids nested O(N*M) string normalization)
-  const borrowedCounts = new Map<string, number>();
-  for (const b of borrowed) {
-    const key = normalizeReturnableName(b.itemName);
-    borrowedCounts.set(key, (borrowedCounts.get(key) || 0) + 1);
-  }
-
-  const pendingCounts = new Map<string, number>();
-  for (const r of pending) {
-    if (!Array.isArray(r.items)) continue;
-    const seenInReq = new Set<string>();
-    for (const i of r.items) {
-      const key = normalizeReturnableName(i);
-      if (!seenInReq.has(key)) {
-        seenInReq.add(key);
-        pendingCounts.set(key, (pendingCounts.get(key) || 0) + 1);
-      }
-    }
-  }
-
-  // Decouple staff manual availability toggles from in-use borrow counts.
-  // In-use counts drive the guest queue dynamically; staff availability switch remains 100% under staff manual control.
-  let hasChanged = false;
-  let autoDepletedChanged = false;
-  const updatedStatus = { ...currentStatus };
-
-  for (const itemKey of TARGET_AUTO_UNAVAILABLE_ITEMS) {
-    if (autoDepletedSet.has(itemKey)) {
-      autoDepletedSet.delete(itemKey);
-      autoDepletedChanged = true;
-      if (updatedStatus[itemKey] === "out_of_service") {
-        updatedStatus[itemKey] = "available";
-        hasChanged = true;
-      }
-    }
-  }
-
-  if (autoDepletedChanged) {
-    saveLiveAutoDepleted(Array.from(autoDepletedSet)).catch(() => {});
-  }
-
-  // 7. If any status changed, update localStorage and Supabase immediately
-  if (hasChanged) {
-    try {
-      localStorage.setItem("hues_stay_amenities", JSON.stringify(updatedStatus));
-    } catch (e) {}
-    await saveLiveAmenitiesStatus(updatedStatus);
-  }
-
-  return updatedStatus;
+/** Catalog items staff removed from the guest page */
+export async function fetchLiveDeletedItems(): Promise<string[] | null> {
+  const value = await readSettingsRow<unknown>(DELETED_ITEMS_ROW);
+  return Array.isArray(value) ? value.map(String) : null;
 }
 
+export function saveLiveDeletedItems(items: string[]) {
+  return writeSettingsRow(DELETED_ITEMS_ROW, items);
+}
 
+/** Room numbers managed on the Rooms & QR Codes page (null until the first change) */
+export async function fetchLiveRooms(): Promise<string[] | null> {
+  const value = await readSettingsRow<unknown>(ROOMS_ROW);
+  return Array.isArray(value) ? value.map(String) : null;
+}
 
+export function saveLiveRooms(roomNumbers: string[]) {
+  return writeSettingsRow(ROOMS_ROW, roomNumbers);
+}

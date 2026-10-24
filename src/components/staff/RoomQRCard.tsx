@@ -18,8 +18,9 @@ export default function RoomQRCard({
   onCopy,
   onDelete,
 }: RoomQRCardProps) {
-  const guestUrl = `${window.location.origin}/room/${room.qrCodeHash || room.roomNumber}`;
-  const isCopied = copiedHash === (room.qrCodeHash || room.roomNumber);
+  // qrCodeHash holds the signed room link; it is empty until the server has created it
+  const guestUrl = room.qrCodeHash ? `${window.location.origin}/room/${room.qrCodeHash}` : "";
+  const isCopied = Boolean(room.qrCodeHash) && copiedHash === room.qrCodeHash;
 
   return (
     <div className="bg-white border border-[#E5E1DB] p-6 flex flex-col items-center text-center hover:border-[#A68966] transition-all shadow-sm">
@@ -34,11 +35,15 @@ export default function RoomQRCard({
 
       <h3 className="text-3xl font-serif text-[#2D2926] mb-1">Room {room.roomNumber}</h3>
       <p className="text-[10px] uppercase tracking-[0.15em] text-[#8C857D] mb-5">
-        QR: /room/{room.qrCodeHash || room.roomNumber}
+        {room.qrCodeHash ? "Signed QR link" : "Creating QR link..."}
       </p>
 
       <div className="bg-white p-3.5 border border-[#E5E1DB] mb-5 shadow-inner">
-        <QRCodeSVG id={`qr-svg-${room.roomNumber}`} value={guestUrl} size={140} />
+        {guestUrl ? (
+          <QRCodeSVG id={`qr-svg-${room.roomNumber}`} value={guestUrl} size={140} />
+        ) : (
+          <div className="w-[140px] h-[140px] flex items-center justify-center text-[10px] text-[#8C857D]">Loading…</div>
+        )}
       </div>
 
       <div className="w-full grid grid-cols-2 gap-2 mb-3">

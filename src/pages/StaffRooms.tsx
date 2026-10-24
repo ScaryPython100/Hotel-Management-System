@@ -1,225 +1,79 @@
 import React, { useEffect, useState, useMemo } from "react";
-import { collection, query, orderBy, onSnapshot, setDoc, deleteDoc, doc } from "firebase/firestore";
-import { db } from "../lib/firebase";
 import { Room, DEFAULT_ROOMS } from "../types";
 import { toast, Toaster } from "sonner";
-import { Plus, Search, Layers, RefreshCw } from "lucide-react";
+import { Plus, Search, Layers, RefreshCw, AlertTriangle } from "lucide-react";
 import { useOutletContext, Navigate } from "react-router-dom";
 import RoomQRCard from "../components/staff/RoomQRCard";
-import { mergeRoomsWithDefaults, printRoomQR, getSuperhostPinHeader } from "../components/staff/roomQrUtils";
+import { printRoomQR, sortRooms } from "../components/staff/roomQrUtils";
+import { fetchLiveRooms, saveLiveRooms, staffApiFetch } from "../lib/supabaseClient";
+import { getSuperhostToken } from "../components/PinAuthModal";
+
+const DEFAULT_ROOM_NUMBERS = DEFAULT_ROOMS.map(r => r.roomNumber);
+
+function toRoom(roomNumber: string, link?: string): Room {
+  return { id: `room-${roomNumber}`, roomNumber, qrCodeHash: link || "", status: "vacant" };
+}
 
 export default function StaffRooms() {
   const { role } = useOutletContext<{ role: "superhost" | "staff" }>();
 
-  // Instant local initialization guaranteeing all 22 rooms are visible immediately
-  const [rooms, setRooms] = useState<Room[]>(() => {
-    let savedRooms: Room[] = [];
-    try {
-      const saved = localStorage.getItem("hues_stay_rooms");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          savedRooms = parsed;
-        }
-      }
-    } catch (e) {}
-    const initial = mergeRoomsWithDefaults(savedRooms);
-    try {
-      localStorage.setItem("hues_stay_rooms", JSON.stringify(initial));
-    } catch (e) {}
-    return initial;
-  });
-
-  const [loading, setLoading] = useState(false);
+  const [roomNumbers, setRoomNumbers] = useState<string[]>(DEFAULT_ROOM_NUMBERS);
+  const [links, setLinks] = useState<Record<string, string>>({});
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(true);
   const [newRoomNumber, setNewRoomNumber] = useState("");
-  const [isAdding, setIsAdding] = useState(false);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [activeFloorFilter, setActiveFloorFilter] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [isSyncing, setIsSyncing] = useState(false);
 
-  if (role !== "superhost") {
-    return <Navigate to="/staff" replace />;
-  }
-
+  // Room list is shared across devices through Supabase
   useEffect(() => {
     let isMounted = true;
-    setIsSyncing(true);
-
-    // 1. Fetch from server API
-    fetch("/api/rooms")
-      .then(r => r.json())
-      .then(data => {
-        if (data.success && Array.isArray(data.rooms) && isMounted) {
-          setRooms(prev => {
-            const merged = mergeRoomsWithDefaults([...prev, ...data.rooms]);
-            try {
-              localStorage.setItem("hues_stay_rooms", JSON.stringify(merged));
-            } catch (e) {}
-            return merged;
-          });
-        }
+    fetchLiveRooms()
+      .then(saved => {
+        if (isMounted && saved && saved.length > 0) setRoomNumbers(saved);
       })
-      .catch(() => {})
       .finally(() => {
         if (isMounted) setIsSyncing(false);
       });
-
-    // 2. Firestore listener - MERGE documents rather than overwriting
-    const q = query(collection(db, "rooms"), orderBy("roomNumber", "asc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const firestoreRooms: Room[] = [];
-      snapshot.forEach((docSnap) => {
-        const d = docSnap.data();
-        firestoreRooms.push({
-          id: docSnap.id,
-          roomNumber: String(d.roomNumber || ""),
-          qrCodeHash: String(d.qrCodeHash || d.roomNumber || ""),
-          status: d.status || "vacant"
-        });
-      });
-
-      if (isMounted) {
-        setRooms(prev => {
-          const merged = mergeRoomsWithDefaults([...prev, ...firestoreRooms]);
-          try {
-            localStorage.setItem("hues_stay_rooms", JSON.stringify(merged));
-          } catch (e) {}
-          return merged;
-        });
-      }
-      setLoading(false);
-    }, (error) => {
-      console.warn("Real-time rooms listener (using cached):", error?.message || "offline");
-      setLoading(false);
-    });
-
-    // 3. Seed missing default rooms to Firestore concurrently in background
-    Promise.allSettled(
-      DEFAULT_ROOMS.map((defRoom) =>
-        setDoc(doc(db, "rooms", `room-${defRoom.roomNumber}`), {
-          roomNumber: defRoom.roomNumber,
-          qrCodeHash: defRoom.qrCodeHash,
-          status: defRoom.status
-        }, { merge: true })
-      )
-    );
-
     return () => {
       isMounted = false;
-      unsubscribe();
     };
   }, []);
 
-  const handleAddRoom = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = newRoomNumber.trim();
-    if (!trimmed) return;
+  // Signed QR link for every room, generated by the server
+  useEffect(() => {
+    const missing = roomNumbers.filter(r => !links[r]);
+    if (missing.length === 0 || role !== "superhost") return;
 
-    if (rooms.some(r => r.roomNumber.toLowerCase() === trimmed.toLowerCase())) {
-      toast.error(`Room ${trimmed} already exists`);
-      return;
-    }
-
-    setIsAdding(true);
-
-    try {
-      const deletedList: string[] = JSON.parse(localStorage.getItem("hues_stay_deleted_rooms") || "[]");
-      const updatedDeleted = deletedList.filter(n => n.toLowerCase() !== trimmed.toLowerCase());
-      localStorage.setItem("hues_stay_deleted_rooms", JSON.stringify(updatedDeleted));
-    } catch (e) {}
-
-    const qrCodeHash = trimmed;
-    const newRoom: Room = {
-      id: `room-${trimmed}`,
-      roomNumber: trimmed,
-      qrCodeHash,
-      status: "vacant"
+    let isMounted = true;
+    staffApiFetch(`/api/staff?action=room-links&rooms=${encodeURIComponent(missing.join(","))}`, {
+      headers: { "x-superhost-token": getSuperhostToken() || "" }
+    })
+      .then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!isMounted) return;
+        if (!res.ok || !data.links) {
+          setLinkError(data.error || `Could not create QR links (status ${res.status})`);
+          return;
+        }
+        setLinkError(null);
+        setLinks(prev => ({ ...prev, ...data.links }));
+      })
+      .catch(() => {
+        if (isMounted) setLinkError("Could not reach the server to create QR links.");
+      });
+    return () => {
+      isMounted = false;
     };
+  }, [roomNumbers, role]);
 
-    setRooms(prev => {
-      const merged = mergeRoomsWithDefaults([...prev, newRoom]);
-      try {
-        localStorage.setItem("hues_stay_rooms", JSON.stringify(merged));
-      } catch (e) {}
-      return merged;
-    });
+  const rooms = useMemo(() => sortRooms(roomNumbers.map(r => toRoom(r, links[r]))), [roomNumbers, links]);
 
-    setNewRoomNumber("");
-    toast.success(`Room ${trimmed} added successfully!`);
-
-    try {
-      await fetch("/api/rooms", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getSuperhostPinHeader()
-        },
-        body: JSON.stringify(newRoom)
-      });
-    } catch (err) {
-      console.warn("Server room sync note:", err);
-    }
-
-    try {
-      await setDoc(doc(db, "rooms", `room-${trimmed}`), {
-        roomNumber: trimmed,
-        qrCodeHash,
-        status: "vacant"
-      }, { merge: true });
-    } catch (error: any) {
-      console.warn("Firestore room save note:", error?.message || "offline");
-    } finally {
-      setIsAdding(false);
-    }
-  };
-
-  const handleDeleteRoom = async (id: string, roomNumber: string) => {
-    if (!window.confirm(`Delete Room ${roomNumber} and its QR code?`)) return;
-
-    try {
-      const deletedList: string[] = JSON.parse(localStorage.getItem("hues_stay_deleted_rooms") || "[]");
-      if (!deletedList.includes(roomNumber)) {
-        deletedList.push(roomNumber);
-        localStorage.setItem("hues_stay_deleted_rooms", JSON.stringify(deletedList));
-      }
-    } catch (e) {}
-
-    setRooms(prev => {
-      const updated = prev.filter(r => r.roomNumber !== roomNumber);
-      try {
-        localStorage.setItem("hues_stay_rooms", JSON.stringify(updated));
-      } catch (e) {}
-      return updated;
-    });
-
-    toast.success(`Room ${roomNumber} deleted`);
-
-    try {
-      await fetch(`/api/rooms/${encodeURIComponent(roomNumber)}`, {
-        method: "DELETE",
-        headers: getSuperhostPinHeader()
-      });
-    } catch (e) {}
-
-    try {
-      const deleteTasks = [deleteDoc(doc(db, "rooms", `room-${roomNumber}`))];
-      if (id && id !== `room-${roomNumber}`) {
-        deleteTasks.push(deleteDoc(doc(db, "rooms", id)));
-      }
-      await Promise.all(deleteTasks);
-    } catch (error: any) {
-      console.warn("Deleted locally:", error?.message || "offline");
-    }
-  };
-
-  const copyGuestLink = (room: Room) => {
-    const url = `${window.location.origin}/room/${room.qrCodeHash || room.roomNumber}`;
-    navigator.clipboard.writeText(url);
-    setCopiedHash(room.qrCodeHash);
-    toast.success(`Copied link for Room ${room.roomNumber}`);
-    setTimeout(() => setCopiedHash(null), 2000);
-  };
+  const floors = useMemo(
+    () => Array.from(new Set(rooms.map(r => r.roomNumber.charAt(0)))).sort(),
+    [rooms]
+  );
 
   const filteredRooms = useMemo(() => {
     const queryLower = searchQuery.toLowerCase().trim();
@@ -230,19 +84,66 @@ export default function StaffRooms() {
     });
   }, [rooms, activeFloorFilter, searchQuery]);
 
-  const floorCounts = useMemo(() => {
-    const counts: Record<string, number> = { all: rooms.length };
-    for (let f = 1; f <= 6; f++) {
-      counts[String(f)] = 0;
+  if (role !== "superhost") {
+    return <Navigate to="/staff" replace />;
+  }
+
+  const saveRooms = async (next: string[], successMessage: string) => {
+    const previous = roomNumbers;
+    setRoomNumbers(next);
+    if (await saveLiveRooms(next)) {
+      toast.success(successMessage);
+    } else {
+      setRoomNumbers(previous);
+      toast.error("Could not save the room list. Please try again.");
     }
-    for (const r of rooms) {
-      const firstChar = r.roomNumber.charAt(0);
-      if (counts[firstChar] !== undefined) {
-        counts[firstChar]++;
-      }
+  };
+
+  const handleAddRoom = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = newRoomNumber.trim();
+    if (!/^[A-Za-z0-9-]{1,20}$/.test(trimmed)) {
+      toast.error("Use letters, numbers or dashes only (e.g. 105).");
+      return;
     }
-    return counts;
-  }, [rooms]);
+    if (roomNumbers.some(r => r.toLowerCase() === trimmed.toLowerCase())) {
+      toast.error(`Room ${trimmed} already exists`);
+      return;
+    }
+    setNewRoomNumber("");
+    await saveRooms([...roomNumbers, trimmed], `Room ${trimmed} added`);
+  };
+
+  const handleDeleteRoom = async (_id: string, roomNumber: string) => {
+    if (!window.confirm(`Delete Room ${roomNumber} and its QR code?`)) return;
+    await saveRooms(roomNumbers.filter(r => r !== roomNumber), `Room ${roomNumber} deleted`);
+  };
+
+  const copyGuestLink = (room: Room) => {
+    if (!room.qrCodeHash) {
+      toast.error("The QR link for this room is not ready yet.");
+      return;
+    }
+    navigator.clipboard.writeText(`${window.location.origin}/room/${room.qrCodeHash}`);
+    setCopiedHash(room.qrCodeHash);
+    toast.success(`Copied link for Room ${room.roomNumber}`);
+    setTimeout(() => setCopiedHash(null), 2000);
+  };
+
+  const handlePrint = (room: Room) => {
+    if (!room.qrCodeHash) {
+      toast.error("The QR link for this room is not ready yet.");
+      return;
+    }
+    printRoomQR(room);
+  };
+
+  const floorButtonClass = (active: boolean) =>
+    `px-3 py-1.5 text-xs uppercase tracking-wider transition-colors ${
+      active
+        ? "bg-[#2D2926] text-white font-medium"
+        : "bg-white text-[#2D2926] border border-[#E5E1DB] hover:bg-[#EFECE8]"
+    }`;
 
   return (
     <>
@@ -261,16 +162,20 @@ export default function StaffRooms() {
                 )}
               </div>
               <p className="text-sm text-[#8C857D] mt-2 italic">
-                Manage all hotel rooms and generate guest service QR codes. Total rooms: {rooms.length}
+                Each QR code holds a signed link for its room. Total rooms: {rooms.length}
               </p>
             </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono uppercase tracking-widest px-3 py-1.5 bg-[#F9F7F4] border border-[#E5E1DB] text-[#2D2926]">
-                {rooms.length} Rooms Active
-              </span>
-            </div>
+            <span className="text-xs font-mono uppercase tracking-widest px-3 py-1.5 bg-[#F9F7F4] border border-[#E5E1DB] text-[#2D2926]">
+              {rooms.length} Rooms Active
+            </span>
           </header>
+
+          {linkError && (
+            <div className="mb-6 p-4 border border-red-200 bg-red-50 text-red-800 text-sm flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{linkError}</span>
+            </div>
+          )}
 
           <form onSubmit={handleAddRoom} className="mb-8 bg-white p-6 border border-[#E5E1DB] shadow-sm flex flex-col sm:flex-row gap-4 sm:items-end">
             <div className="flex-1">
@@ -288,11 +193,11 @@ export default function StaffRooms() {
             </div>
             <button
               type="submit"
-              disabled={isAdding || !newRoomNumber.trim()}
+              disabled={!newRoomNumber.trim()}
               className="bg-[#1A1A1A] text-white px-7 py-3 text-[10px] uppercase tracking-[0.2em] font-medium hover:bg-[#333] transition-colors disabled:opacity-50 flex items-center justify-center shrink-0"
             >
               <Plus className="w-4 h-4 mr-2" />
-              {isAdding ? "Adding..." : "Add Room"}
+              Add Room
             </button>
           </form>
 
@@ -301,29 +206,17 @@ export default function StaffRooms() {
               <span className="text-[10px] uppercase tracking-wider font-semibold text-[#8C857D] mr-2 flex items-center gap-1">
                 <Layers className="w-3.5 h-3.5" /> Floor:
               </span>
-              <button
-                type="button"
-                onClick={() => setActiveFloorFilter("all")}
-                className={`px-3 py-1.5 text-xs uppercase tracking-wider transition-colors ${
-                  activeFloorFilter === "all"
-                    ? "bg-[#2D2926] text-white font-medium"
-                    : "bg-white text-[#2D2926] border border-[#E5E1DB] hover:bg-[#EFECE8]"
-                }`}
-              >
-                All ({floorCounts.all || 0})
+              <button type="button" onClick={() => setActiveFloorFilter("all")} className={floorButtonClass(activeFloorFilter === "all")}>
+                All ({rooms.length})
               </button>
-              {[1, 2, 3, 4, 5, 6].map(floor => (
+              {floors.map(floor => (
                 <button
                   key={floor}
                   type="button"
-                  onClick={() => setActiveFloorFilter(String(floor))}
-                  className={`px-3 py-1.5 text-xs uppercase tracking-wider transition-colors ${
-                    activeFloorFilter === String(floor)
-                      ? "bg-[#2D2926] text-white font-medium"
-                      : "bg-white text-[#2D2926] border border-[#E5E1DB] hover:bg-[#EFECE8]"
-                  }`}
+                  onClick={() => setActiveFloorFilter(floor)}
+                  className={floorButtonClass(activeFloorFilter === floor)}
                 >
-                  Floor {floor} ({floorCounts[String(floor)] || 0})
+                  Floor {floor} ({rooms.filter(r => r.roomNumber.startsWith(floor)).length})
                 </button>
               ))}
             </div>
@@ -340,31 +233,25 @@ export default function StaffRooms() {
             </div>
           </div>
 
-          {loading ? (
-            <div className="flex justify-center py-20">
-              <div className="animate-spin h-12 w-12 border-t-2 border-b-2 border-[#A68966]"></div>
-            </div>
-          ) : (
-            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {filteredRooms.map((room) => (
-                <RoomQRCard
-                  key={room.roomNumber}
-                  room={room}
-                  copiedHash={copiedHash}
-                  onPrint={printRoomQR}
-                  onCopy={copyGuestLink}
-                  onDelete={handleDeleteRoom}
-                />
-              ))}
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {filteredRooms.map((room) => (
+              <RoomQRCard
+                key={room.roomNumber}
+                room={room}
+                copiedHash={copiedHash}
+                onPrint={handlePrint}
+                onCopy={copyGuestLink}
+                onDelete={handleDeleteRoom}
+              />
+            ))}
 
-              {filteredRooms.length === 0 && (
-                <div className="col-span-full py-16 text-center text-[#8C857D] bg-[#FAF8F5] border border-dashed border-[#E5E1DB]">
-                  <p className="font-serif text-lg mb-1">No rooms match your filter.</p>
-                  <p className="text-xs">Try switching floors or clearing your search query.</p>
-                </div>
-              )}
-            </div>
-          )}
+            {filteredRooms.length === 0 && (
+              <div className="col-span-full py-16 text-center text-[#8C857D] bg-[#FAF8F5] border border-dashed border-[#E5E1DB]">
+                <p className="font-serif text-lg mb-1">No rooms match your filter.</p>
+                <p className="text-xs">Try switching floors or clearing your search query.</p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </>

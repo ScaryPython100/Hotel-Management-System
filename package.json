@@ -21,7 +21,6 @@
     "date-fns": "^4.4.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
-    "firebase": "11.1.0",
     "framer-motion": "^13.4.4",
     "lucide-react": "^0.546.0",
     "qrcode.react": "^4.2.0",

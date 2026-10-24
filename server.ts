@@ -23,7 +23,11 @@ import {
   saveAmenitiesToSupabase,
   clearAllRequestsFromSupabase
 } from "./src/lib/supabaseServer";
-import { isReturnableItem, getItemUnitConsumption, normalizeReturnableName } from "./src/types";
+import { isReturnableItem, normalizeReturnableName } from "./src/types";
+import requestsHandler from "./api/requests.js";
+import borrowedHandler from "./api/borrowed.js";
+import guestHandler from "./api/guest.js";
+import staffHandler from "./api/staff.js";
 
 function extractBaseApplianceName(name: string): string {
   const clean = String(name || "").toLowerCase().trim();
@@ -330,6 +334,20 @@ function isAuthorizedSuperhost(req: express.Request): boolean {
 
 async function startServer() {
   app.use(express.json());
+
+  // The same handlers that run on Vercel, so local behaviour (staff sign-in, signed room
+  // links) matches production. Registered first, so they take precedence over the older
+  // dev-only routes for these paths below.
+  const withPathId = (handler: (req: any, res: any) => any) => (req: express.Request, res: express.Response) => {
+    (req.query as any).id = req.params.id;
+    return handler(req, res);
+  };
+  app.all("/api/guest", guestHandler);
+  app.all("/api/staff", staffHandler);
+  app.all("/api/requests", requestsHandler);
+  app.all("/api/requests/:id", withPathId(requestsHandler));
+  app.all("/api/borrowed", borrowedHandler);
+  app.all("/api/borrowed/:id", withPathId(borrowedHandler));
 
   // Hydrate amenities status from Supabase for guaranteed multi-device consistency
   try {
@@ -1488,7 +1506,11 @@ function deduplicateServerRequests(list: ServerRequest[]): ServerRequest[] {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    startEmailNotificationDaemon();
+    // Off by default: it emails staff about recent requests from the shared database,
+    // so a local copy would duplicate the live site's emails.
+    if (process.env.ENABLE_DEV_EMAIL_DAEMON === "true") {
+      startEmailNotificationDaemon();
+    }
   });
 }
 

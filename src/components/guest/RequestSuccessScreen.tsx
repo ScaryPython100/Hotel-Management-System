@@ -30,20 +30,7 @@ export const ITEM_EMOJI_MAP: Record<string, string> = {
   "Coffee Sachet": "☕",
   "Soft Drinks (300mL)": "🥤",
   "Toned Milk": "🥛",
-  "Masala Box": "🧂",
-  // Backward compatibility:
-  "Maggi (₹20)": "🍜",
-  "Eggs (₹10)": "🥚",
-  "Coffee Sachet (₹5 per sachet)": "☕",
-  "Soft Drinks (₹50)": "🥤",
-  "Toned Milk 200/500 mL (₹30)": "🥛",
-  "Masala Box (₹50)": "🧂",
-
-  // Legacy fallback
-  "Leg Massager (Paid)": "🦵",
-  "Glasses (Set of 2)": "🥃",
-  "USB 3.0 Cable + Adaptor": "🔌",
-  "Infrared Heat Therapy Lamp (Paid)": "💡"
+  "Masala Box": "🧂"
 };
 
 interface RequestSuccessScreenProps {

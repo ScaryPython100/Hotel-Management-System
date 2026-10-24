@@ -1,8 +1,11 @@
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, QrCode, Settings, LogOut, Lock } from "lucide-react";
+import { LayoutDashboard, QrCode, Settings, LogOut, Lock, Loader2 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { toast, Toaster } from "sonner";
-import PinAuthModal from "../components/PinAuthModal";
+import type { Session } from "@supabase/supabase-js";
+import PinAuthModal, { getSuperhostToken, clearSuperhostToken } from "../components/PinAuthModal";
+import StaffLogin from "../components/staff/StaffLogin";
+import { getClientSupabase } from "../lib/supabaseClient";
 
 export default function StaffLayout() {
   const location = useLocation();
@@ -10,20 +13,50 @@ export default function StaffLayout() {
   const [role, setRole] = useState<"superhost" | "staff">("staff");
   const [isInitializing, setIsInitializing] = useState(true);
   const [showPinModal, setShowPinModal] = useState(false);
+  const [session, setSession] = useState<Session | null>(null);
 
   useEffect(() => {
-    const savedRole = localStorage.getItem("staffRole") as "superhost" | "staff" | null;
-    if (savedRole === "superhost") {
+    if (getSuperhostToken()) {
       setRole("superhost");
     }
-    setIsInitializing(false);
+
+    const sb = getClientSupabase();
+    if (!sb) {
+      setIsInitializing(false);
+      return;
+    }
+    sb.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setIsInitializing(false);
+    });
+    const { data: listener } = sb.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+    return () => listener.subscription.unsubscribe();
   }, []);
 
-  if (isInitializing) return null;
+  if (isInitializing) {
+    return (
+      <div className="min-h-screen bg-[#F9F7F4] flex items-center justify-center">
+        <Loader2 className="w-6 h-6 animate-spin text-[#A68966]" />
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <StaffLogin title="Hues Stay Luxury Rooms" />;
+  }
+
+  const handleSignOut = async () => {
+    clearSuperhostToken();
+    setRole("staff");
+    await getClientSupabase()?.auth.signOut();
+    navigate("/staff");
+  };
 
   const handleSuperhostToggle = () => {
     if (role === "superhost") {
-      localStorage.removeItem("staffRole");
+      clearSuperhostToken();
       setRole("staff");
       navigate("/staff");
       toast.success("Returned to Staff View");
@@ -34,7 +67,6 @@ export default function StaffLayout() {
 
   const handlePinSuccess = () => {
     setRole("superhost");
-    localStorage.setItem("staffRole", "superhost");
   };
 
   const navItems = [
@@ -79,7 +111,7 @@ export default function StaffLayout() {
         </nav>
 
         {/* Access Toggle */}
-        <div className="p-8 border-t border-white/10">
+        <div className="p-8 border-t border-white/10 space-y-3">
           <button 
             onClick={handleSuperhostToggle}
             className="flex items-center w-full p-4 text-[#8C857D] hover:text-white transition-colors border border-white/10 hover:border-white/20 bg-white/5 hover:bg-white/10"
@@ -95,6 +127,14 @@ export default function StaffLayout() {
                 <span className="text-[10px] uppercase tracking-[0.2em] font-medium text-[#A68966]">Superhost Access</span>
               </>
             )}
+          </button>
+          <button
+            onClick={handleSignOut}
+            className="flex items-center w-full p-4 text-[#8C857D] hover:text-white transition-colors border border-white/10 hover:border-white/20"
+            title={session.user.email || "Sign out"}
+          >
+            <LogOut className="w-5 h-5 mr-3" />
+            <span className="text-[10px] uppercase tracking-[0.2em] font-medium">Sign Out</span>
           </button>
         </div>
       </aside>

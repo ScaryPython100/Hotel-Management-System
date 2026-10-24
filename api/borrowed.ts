@@ -1,6 +1,13 @@
+import { getStaffUser } from "./_lib/security.js";
+
+// Borrowed (returnable) items. Staff only.
 export default async function handler(req: any, res: any) {
+  if (!(await getStaffUser(req))) {
+    return res.status(401).json({ success: false, error: "Staff sign-in required" });
+  }
+
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
-  const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY)?.trim();
+  const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY)?.trim();
 
   if (!supabaseUrl || !supabaseKey) {
     return res.status(200).json({ success: true, items: [], message: "Supabase not configured" });

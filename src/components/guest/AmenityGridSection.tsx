@@ -5,7 +5,6 @@ import {
   PAGE_2_RETURNABLE_ITEMS,
   PAGE_3_FNB_DEPOSIT_ITEMS,
   PAGE_3_QUICK_FOOD_ITEMS,
-  getItemUnitConsumption,
   isReturnableItem,
   normalizeReturnableName,
   extractBaseItemName
@@ -89,14 +88,7 @@ export default function AmenityGridSection({
     "Set of Cups/Bowls": 1,
     "Set of Glasses": 1,
     "Empty Water Bottle": 1,
-    "Cooking Oil Dispenser": 1,
-    // Backward compatibility:
-    "Maggi (₹20)": 1,
-    "Eggs (₹10)": 2,
-    "Coffee Sachet (₹5 per sachet)": 2,
-    "Soft Drinks (₹50)": 1,
-    "Toned Milk 200/500 mL (₹30)": 1,
-    "Masala Box (₹50)": 1
+    "Cooking Oil Dispenser": 1
   });
 
   const getQty = (baseName: string) => itemQuantities[baseName] || 1;
@@ -290,7 +282,7 @@ export default function AmenityGridSection({
               const item = itemObj.name;
               const selected = isSelected(item);
               const inv = getInventoryData(item);
-              const neededUnits = getItemUnitConsumption(item);
+              const neededUnits = 1;
               const availableUnits = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
               const isOutOfStock = (itemObj.isLimited || inv !== undefined) && inv && availableUnits < neededUnits;
               const isOutOfService = checkIsItemOutOfService(item);

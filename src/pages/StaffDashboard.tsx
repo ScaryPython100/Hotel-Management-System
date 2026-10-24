@@ -10,11 +10,7 @@ import {
   saveLiveBorrowed,
   relayLiveBorrowedItem,
   clearAllLiveRequests,
-  syncInventoryAvailability,
-  getClientSupabase,
-  fetchLiveDismissedRequests,
-  saveLiveDismissedRequests,
-  fetchLiveInventoryLimits
+  getClientSupabase
 } from "../lib/supabaseClient";
 import {
   CheckCircle2,
@@ -27,19 +23,6 @@ import {
 import { toast, Toaster } from "sonner";
 import RoomGroupCard from "../components/staff/RoomGroupCard";
 import BorrowedItemsSection from "../components/staff/BorrowedItemsSection";
-
-function getDismissedRequestIds(): string[] {
-  try {
-    const raw = localStorage.getItem("hues_stay_dismissed_requests");
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // Only accept unique IDs (req-..., srv-..., local-..., or long UUIDs) - NEVER room signatures
-    return parsed.filter((id: any) => typeof id === "string" && !id.includes("::") && (id.startsWith("req-") || id.startsWith("srv-") || id.startsWith("local-") || id.length > 20));
-  } catch {
-    return [];
-  }
-}
 
 export function deduplicateRequests(reqList: RoomRequest[]): RoomRequest[] {
   const result: RoomRequest[] = [];
@@ -75,34 +58,13 @@ export function deduplicateRequests(reqList: RoomRequest[]): RoomRequest[] {
   return result;
 }
 
-function normalizeApplianceName(name: string): string {
-  const lower = (name || "").toLowerCase().trim();
-  if (lower.includes("glass")) return "Glasses (Set of 2)";
-  if (lower.includes("kettle") || lower.includes("teakettle")) return "Kettle";
-  if (lower.includes("iron")) return "Iron Box";
-  if (lower.includes("dryer")) return "Hair Dryer";
-  if (lower.includes("laptop")) return "Laptop Table";
-  if (lower.includes("massager")) return "Leg Massager (Paid)";
-  if (lower.includes("adaptor") || lower.includes("cable") || lower.includes("usb")) {
-    return "USB 3.0 Cable + Adaptor";
-  }
-  if (lower.includes("infrared") || lower.includes("lamp") || lower.includes("heat therapy")) {
-    return "Infrared Heat Therapy Lamp (Paid)";
-  }
-  return name.trim();
-}
-
 export default function StaffDashboard() {
   const [requests, setRequests] = useState<RoomRequest[]>(() => {
     try {
       const saved = localStorage.getItem("hues_stay_requests");
       if (saved) {
         const parsed = JSON.parse(saved);
-        const dismissed = new Set(getDismissedRequestIds());
-        const filtered = (Array.isArray(parsed) ? parsed : []).filter((r: RoomRequest) =>
-          !dismissed.has(r.id || "")
-        );
-        return deduplicateRequests(filtered);
+        return deduplicateRequests(Array.isArray(parsed) ? parsed : []);
       }
     } catch (e) {}
     return [];
@@ -118,46 +80,29 @@ export default function StaffDashboard() {
   const [activeTab, setActiveTab] = useState<"cards" | "borrowed">("cards");
   const [isManualSyncing, setIsManualSyncing] = useState(false);
 
+  const applyLiveData = (liveReqs: RoomRequest[] | null, liveBor: BorrowedItem[] | null) => {
+    if (Array.isArray(liveReqs)) {
+      const sorted = [...liveReqs].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      const deduplicated = deduplicateRequests(sorted);
+      setRequests(deduplicated);
+      try {
+        localStorage.setItem("hues_stay_requests", JSON.stringify(deduplicated));
+      } catch (e) {}
+    }
+    if (Array.isArray(liveBor)) {
+      const sorted = [...liveBor].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      setBorrowedItems(sorted);
+      try {
+        localStorage.setItem("hues_stay_borrowed", JSON.stringify(sorted));
+      } catch (e) {}
+    }
+  };
+
   useEffect(() => {
     const refreshData = async () => {
       try {
-        const [liveReqs, liveBor, cloudDismissed] = await Promise.all([
-          fetchLiveRequests(),
-          fetchLiveBorrowed(),
-          fetchLiveDismissedRequests()
-        ]);
-
-        const localDismissed = getDismissedRequestIds();
-        const dismissedSet = new Set([...cloudDismissed, ...localDismissed]);
-        const allDismissed = Array.from(dismissedSet);
-        try {
-          localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(allDismissed));
-        } catch (e) {}
-
-        if (Array.isArray(liveReqs)) {
-          const valid = liveReqs
-            .filter((r: RoomRequest) => !dismissedSet.has(r.id || ""))
-            .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
-
-          const deduplicated = deduplicateRequests(valid);
-          setRequests(deduplicated);
-          try {
-            localStorage.setItem("hues_stay_requests", JSON.stringify(deduplicated));
-          } catch (e) {}
-        }
-
-        if (Array.isArray(liveBor)) {
-          const sorted = liveBor.sort((a: BorrowedItem, b: BorrowedItem) => (b.createdAt || 0) - (a.createdAt || 0));
-          setBorrowedItems(sorted);
-          try {
-            localStorage.setItem("hues_stay_borrowed", JSON.stringify(sorted));
-          } catch (e) {}
-        }
-
-        syncInventoryAvailability(
-          Array.isArray(liveBor) ? liveBor : undefined,
-          Array.isArray(liveReqs) ? liveReqs : undefined
-        ).catch(() => {});
+        const [liveReqs, liveBor] = await Promise.all([fetchLiveRequests(), fetchLiveBorrowed()]);
+        applyLiveData(liveReqs, liveBor);
       } catch (e: any) {
         console.warn("Live sync refresh error:", e?.message || e);
       } finally {
@@ -258,9 +203,6 @@ export default function StaffDashboard() {
     }
 
     await updateLiveRequestStatus(id, "completed");
-
-    const nextBorrowedList = [...newlyCreatedBorrowed, ...borrowedItems];
-    syncInventoryAvailability(nextBorrowedList, updated).catch(() => {});
   };
 
   const handleToggleStatus = async (id: string, currentStatus: "pending" | "completed") => {
@@ -284,9 +226,6 @@ export default function StaffDashboard() {
     toast.success(`Request marked as ${newStatus}`);
 
     await updateLiveRequestStatus(id, newStatus);
-
-    const nextBorrowedList = [...toAdd, ...borrowedItems];
-    syncInventoryAvailability(nextBorrowedList, updated).catch(() => {});
   };
 
   const handleDelete = async (id: string) => {
@@ -299,16 +238,11 @@ export default function StaffDashboard() {
       localStorage.setItem("hues_stay_requests", JSON.stringify(updated));
     } catch (e) {}
 
-    try {
-      const cloudDismissed = await fetchLiveDismissedRequests();
-      const localDismissed = getDismissedRequestIds();
-      const allDismissed = Array.from(new Set([...cloudDismissed, ...localDismissed, id]));
-      await saveLiveDismissedRequests(allDismissed);
-    } catch (e) {}
-
-    toast.success("Request removed from dashboard across all devices");
-
-    await dismissLiveRequest(id);
+    if (await dismissLiveRequest(id)) {
+      toast.success("Request removed from dashboard across all devices");
+    } else {
+      toast.error("Could not remove the request. Please try again.");
+    }
   };
 
   const handleClearCompleted = async () => {
@@ -329,60 +263,20 @@ export default function StaffDashboard() {
       localStorage.setItem("hues_stay_requests", JSON.stringify(remaining));
     } catch (e) {}
 
-    try {
-      const cloudDismissed = await fetchLiveDismissedRequests();
-      const localDismissed = getDismissedRequestIds();
-      const allDismissed = Array.from(new Set([...cloudDismissed, ...localDismissed, ...completedIds]));
-      await saveLiveDismissedRequests(allDismissed);
-    } catch (e) {}
-
-    await Promise.all(completedIds.map(id => dismissLiveRequest(id)));
-
-    toast.success(`Cleared ${completed.length} completed records across all devices.`);
+    const results = await Promise.all(completedIds.map(id => dismissLiveRequest(id)));
+    if (results.every(Boolean)) {
+      toast.success(`Cleared ${completed.length} completed records across all devices.`);
+    } else {
+      toast.error("Some completed requests could not be cleared. Please try again.");
+    }
   };
 
   const handleManualSyncToDatabase = async () => {
     setIsManualSyncing(true);
     try {
-      const [liveReqs, liveBor, cloudDismissed, liveLimits] = await Promise.all([
-        fetchLiveRequests(),
-        fetchLiveBorrowed(),
-        fetchLiveDismissedRequests(),
-        fetchLiveInventoryLimits()
-      ]);
-
-      const localDismissed = getDismissedRequestIds();
-      const dismissedSet = new Set([...cloudDismissed, ...localDismissed]);
-      const allDismissed = Array.from(dismissedSet);
-      try {
-        localStorage.setItem("hues_stay_dismissed_requests", JSON.stringify(allDismissed));
-      } catch (e) {}
-
-      if (Array.isArray(liveReqs)) {
-        const valid = liveReqs
-          .filter((r: RoomRequest) => !dismissedSet.has(r.id || ""))
-          .sort((a: RoomRequest, b: RoomRequest) => (b.createdAt || 0) - (a.createdAt || 0));
-        const deduplicated = deduplicateRequests(valid);
-        setRequests(deduplicated);
-        try {
-          localStorage.setItem("hues_stay_requests", JSON.stringify(deduplicated));
-        } catch (e) {}
-      }
-
-      if (Array.isArray(liveBor)) {
-        const sorted = liveBor.sort((a: BorrowedItem, b: BorrowedItem) => (b.createdAt || 0) - (a.createdAt || 0));
-        setBorrowedItems(sorted);
-        try {
-          localStorage.setItem("hues_stay_borrowed", JSON.stringify(sorted));
-        } catch (e) {}
-      }
-
-      await syncInventoryAvailability(
-        Array.isArray(liveBor) ? liveBor : undefined,
-        Array.isArray(liveReqs) ? liveReqs : undefined,
-        liveLimits || undefined
-      );
-
+      const [liveReqs, liveBor] = await Promise.all([fetchLiveRequests(), fetchLiveBorrowed()]);
+      if (!liveReqs || !liveBor) throw new Error("Database not reachable");
+      applyLiveData(liveReqs, liveBor);
       toast.success("Database synced successfully across all devices!");
     } catch (err: any) {
       console.error("Manual sync failed:", err);
@@ -401,15 +295,13 @@ export default function StaffDashboard() {
     try {
       localStorage.removeItem("hues_stay_requests");
       localStorage.removeItem("hues_stay_borrowed");
-      localStorage.removeItem("hues_stay_dismissed_requests");
     } catch (e) {}
     toast.loading("Clearing database...", { id: "clear-db" });
     const ok = await clearAllLiveRequests();
-    syncInventoryAvailability([], []).catch(() => {});
     if (ok) {
       toast.success("Database and dashboard completely cleared!", { id: "clear-db" });
     } else {
-      toast.success("Dashboard and database reset.", { id: "clear-db" });
+      toast.error("Could not clear the database. Please try again.", { id: "clear-db" });
     }
   };
 
@@ -425,7 +317,6 @@ export default function StaffDashboard() {
     toast.success(`Collected ${itemName} back from Room ${room || "room"}! Returned to inventory.`);
 
     await markLiveBorrowedReturned(borrowedId);
-    syncInventoryAvailability(updated, requests).catch(() => {});
   };
 
   const handleDeleteBorrowed = async (id: string, itemName: string) => {
@@ -439,7 +330,6 @@ export default function StaffDashboard() {
     toast.success(`Removed ${itemName} from dashboard view.`);
 
     await deleteLiveBorrowed(id);
-    syncInventoryAvailability(remaining, requests).catch(() => {});
   };
 
   const handleRelayBorrowedItem = async (
@@ -501,7 +391,6 @@ export default function StaffDashboard() {
     if (!relayed) {
       toast.error(`Relay of ${cleanItemName} to Room ${targetRoom} did not fully save. Please refresh and check the borrowed items.`, { duration: 8000 });
     }
-    syncInventoryAvailability(nextBorrowed, updatedRequests).catch(() => {});
   };
 
   const pendingRequests = useMemo(() => requests.filter(r => r.status === "pending"), [requests]);
@@ -511,7 +400,7 @@ export default function StaffDashboard() {
     const map = new Map<string, BorrowedItem>();
     for (const b of borrowedItems) {
       if (b.status !== "borrowed") continue;
-      const normalized = normalizeApplianceName(b.itemName);
+      const normalized = normalizeReturnableName(b.itemName);
       const key = `${b.roomId.toLowerCase().trim()}::${normalized.toLowerCase().trim()}`;
       if (!map.has(key)) {
         map.set(key, { ...b, itemName: normalized });

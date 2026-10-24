@@ -1,20 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { collection, setDoc, query, where, getDocs, onSnapshot, doc } from "firebase/firestore";
-import { db } from "../lib/firebase";
-import { getClientSupabase, 
-  fetchLiveAmenitiesStatus, 
-  fetchLiveBorrowed, 
-  fetchLiveRequests, 
-  fetchLiveInventoryLimits,
-  fetchLiveDeletedItems
-} from "../lib/supabaseClient";
 import { cn } from "../lib/utils";
 import { 
   COMMON_ITEMS, 
-  DEFAULT_ROOMS, 
-  Room, 
-  getItemUnitConsumption, 
   DEFAULT_AMENITY_STATUS,
   TARGET_AUTO_UNAVAILABLE_ITEMS,
   DEFAULT_INVENTORY_LIMITS,
@@ -54,47 +42,35 @@ import RequestSuccessScreen from "../components/guest/RequestSuccessScreen";
 import GuestDetailsForm from "../components/guest/GuestDetailsForm";
 import AmenityGridSection from "../components/guest/AmenityGridSection";
 
-// Fast local resolver: resolves in 0 milliseconds
-function resolveRoomInstantly(hash?: string): string | null {
-  if (!hash) return null;
-  const clean = hash.trim();
+const SUPERVISOR_PHONE = "8431995152";
 
-  // 1. Direct number check (e.g. "101", "room-101", "suite102")
-  const numMatch = clean.match(/\b\d{2,4}\b/);
-
+// Room links already confirmed by the server on this phone, so reloads render instantly
+function readKnownRoomLink(link?: string): string | null {
+  if (!link) return null;
   try {
-    const saved = localStorage.getItem("hues_stay_rooms");
-    if (saved) {
-      const rooms: Room[] = JSON.parse(saved);
-      const byHash = rooms.find(r => r.qrCodeHash.toLowerCase() === clean.toLowerCase());
-      if (byHash) return byHash.roomNumber;
+    const known = JSON.parse(localStorage.getItem("hues_stay_room_links") || "{}");
+    return typeof known[link] === "string" ? known[link] : null;
+  } catch {
+    return null;
+  }
+}
 
-      const byNum = rooms.find(r => r.roomNumber.toLowerCase() === clean.toLowerCase());
-      if (byNum) return byNum.roomNumber;
-    }
-  } catch (e) {}
-
-  // 2. Default rooms fallback
-  const defMatch = DEFAULT_ROOMS.find(
-    r => r.qrCodeHash.toLowerCase() === clean.toLowerCase() || 
-         r.roomNumber.toLowerCase() === clean.toLowerCase()
-  );
-  if (defMatch) return defMatch.roomNumber;
-
-  // 3. Extracted number
-  if (numMatch) return numMatch[0];
-
-  return null;
+function rememberRoomLink(link: string, room: string) {
+  try {
+    const known = JSON.parse(localStorage.getItem("hues_stay_room_links") || "{}");
+    known[link] = room;
+    localStorage.setItem("hues_stay_room_links", JSON.stringify(known));
+  } catch {}
 }
 
 export default function GuestView() {
   const { hash } = useParams<{ hash: string }>();
 
-  // Instant room initialization (0ms if cached/numeric/default)
-  const initialRoom = resolveRoomInstantly(hash);
-  const [roomNumber, setRoomNumber] = useState<string | null>(initialRoom);
+  // The signed link from the QR code identifies the room; the server confirms it
+  const [roomLink, setRoomLink] = useState<string | null>(hash?.trim() || null);
+  const [roomNumber, setRoomNumber] = useState<string | null>(() => readKnownRoomLink(hash?.trim()));
   const [manualRoomInput, setManualRoomInput] = useState("");
-  const [isValidating, setIsValidating] = useState(!initialRoom);
+  const [isValidating, setIsValidating] = useState(() => Boolean(hash?.trim()) && !readKnownRoomLink(hash?.trim()));
   
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
   const [customMessage, setCustomMessage] = useState("");
@@ -146,265 +122,82 @@ export default function GuestView() {
     return [];
   });
 
-  // Background room verification with strict 800ms timeout
-  useEffect(() => {
-    if (roomNumber) {
-      setIsValidating(false);
-      return;
-    }
-
-    if (!hash) {
-      setIsValidating(false);
-      return;
-    }
-
-    let isMounted = true;
-
-    async function checkRemoteRoom() {
-      try {
-        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 800));
-        
-        const fetchPromise = (async () => {
-          try {
-            const q = query(collection(db, "rooms"), where("qrCodeHash", "==", hash));
-            const snapshot = await getDocs(q);
-            if (!snapshot.empty) {
-              return snapshot.docs[0].data().roomNumber as string;
-            }
-          } catch (e: any) {
-            console.warn("Could not reach remote Firestore, falling back:", e?.message || "offline");
-          }
-          return null;
-        })();
-
-        const matched = await Promise.race([fetchPromise, timeoutPromise]);
-        if (isMounted) {
-          if (matched) {
-            setRoomNumber(matched);
-          } else {
-            // Check if hash has digits
-            const digits = hash?.replace(/\D/g, "");
-            if (digits && digits.length >= 2) {
-              setRoomNumber(digits);
-            }
-          }
-        }
-      } catch (err: any) {
-        console.warn("Validation check error:", err?.message || "error");
-      } finally {
-        if (isMounted) setIsValidating(false);
-      }
-    }
-
-    checkRemoteRoom();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [hash, roomNumber]);
-
-  // Helper to resolve inventory data supporting aliases like "Glasses (Set of 2)" and "Teakettle"
   const getInventoryData = (name: string) => {
     if (inventory[name]) return inventory[name];
+    const canonical = normalizeReturnableName(name);
+    if (inventory[canonical]) return inventory[canonical];
     const lower = name.toLowerCase().trim();
-    if (lower.includes("glass")) {
-      return inventory["Glasses (Set of 2)"] || inventory["Glasses"] || inventory["Water Glasses"];
-    }
-    if (lower.includes("kettle") || lower.includes("teakettle")) {
-      return inventory["Teakettle"] || inventory["Kettle"];
-    }
     const foundKey = Object.keys(inventory).find(k => k.toLowerCase().trim() === lower);
     if (foundKey) return inventory[foundKey];
     return undefined;
   };
 
-  // Real-time updates in background (non-blocking)
+  // Live availability from the server every 2 seconds (no other guests' details are sent)
   useEffect(() => {
+    if (!roomLink) {
+      setIsValidating(false);
+      return;
+    }
     let isMounted = true;
 
-    // Fetch live inventory directly from Supabase borrowed items, requests, limits, and deleted items
-    const fetchLiveInventory = async () => {
+    const refresh = async () => {
       try {
-        const [liveBor, liveReqs, liveLimits, liveDeleted] = await Promise.all([
-          fetchLiveBorrowed(),
-          fetchLiveRequests(),
-          fetchLiveInventoryLimits(),
-          fetchLiveDeletedItems()
-        ]);
-
-        const deletedSet = new Set(liveDeleted || []);
-        if (isMounted && liveDeleted) {
-          setDeletedItems(liveDeleted);
-          try {
-            localStorage.setItem("hues_stay_deleted_items", JSON.stringify(liveDeleted));
-          } catch (e) {}
-        }
-
-        const limits: Record<string, number> = {
-          ...DEFAULT_INVENTORY_LIMITS,
-          ...(liveLimits || {})
-        };
-
-        // Pre-aggregate borrowed and pending request counts in a single pass
-        const borrowedCounts = new Map<string, number>();
-        for (const b of liveBor || []) {
-          if (b.status === "borrowed") {
-            const norm = normalizeReturnableName(b.itemName);
-            borrowedCounts.set(norm, (borrowedCounts.get(norm) || 0) + 1);
-          }
-        }
-
-        const pendingCounts = new Map<string, number>();
-        const wlCounts: Record<string, number> = {};
-        for (const r of liveReqs || []) {
-          if (r.status === "pending") {
-            const matchedCanonical = new Set<string>();
-            for (const i of r.items || []) {
-              matchedCanonical.add(normalizeReturnableName(i));
-            }
-            for (const norm of matchedCanonical) {
-              pendingCounts.set(norm, (pendingCounts.get(norm) || 0) + 1);
-            }
-            if (r.isWaitlist && r.waitlistForItem) {
-              const wlNorm = normalizeReturnableName(r.waitlistForItem);
-              wlCounts[wlNorm] = (wlCounts[wlNorm] || 0) + 1;
-            }
-          }
-        }
-        if (isMounted) {
-          setWaitlistCounts(wlCounts);
-        }
-
-        const invMap: Record<string, { inUse: number, limit: number }> = {};
-
-        // Include ALL items: default items + target items + custom items added via limits
-        const allItemKeys = Array.from(new Set([
-          ...COMMON_ITEMS.filter(i => i.category === 'Item').map(i => i.name),
-          ...TARGET_AUTO_UNAVAILABLE_ITEMS,
-          ...Object.keys(limits)
-        ])).filter(name => !deletedSet.has(name));
-
-        for (const itemKey of allItemKeys) {
-          const canonical = normalizeReturnableName(itemKey);
-          const borrowedCount =
-            (borrowedCounts.get(canonical) || 0) +
-            (canonical !== itemKey ? borrowedCounts.get(itemKey) || 0 : 0);
-          const pendingCount =
-            (pendingCounts.get(canonical) || 0) +
-            (canonical !== itemKey ? pendingCounts.get(itemKey) || 0 : 0);
-
-          const inUse = borrowedCount + pendingCount;
-          const limit = limits[itemKey] ?? limits[canonical] ?? DEFAULT_INVENTORY_LIMITS[itemKey] ?? 1;
-
-          invMap[itemKey] = { inUse, limit };
-          if (itemKey === "Glasses (Set of 2)") {
-            invMap["Glasses"] = { inUse, limit };
-          } else if (itemKey === "Kettle") {
-            invMap["Teakettle"] = { inUse, limit };
-          }
-        }
-
-        if (isMounted) {
-          setInventory(prev => ({ ...prev, ...invMap }));
-          try {
-            localStorage.setItem("hues_stay_inventory", JSON.stringify(invMap));
-          } catch (e) {}
-        }
-      } catch (err) {
-        console.warn("Live inventory fetch note:", err);
-      }
-    };
-
-    // Fetch live amenities status from Supabase & API (guaranteed instant sync across mobile & desktop)
-    const fetchLiveAmenities = async () => {
-      try {
-        const liveStatus = await fetchLiveAmenitiesStatus();
-        if (liveStatus && isMounted) {
-          setAmenitiesStatus(prev => ({ ...prev, ...liveStatus }));
-          try {
-            localStorage.setItem("hues_stay_amenities", JSON.stringify(liveStatus));
-          } catch (e) {}
+        const res = await fetch(`/api/guest?token=${encodeURIComponent(roomLink)}`);
+        if (!isMounted) return;
+        if (res.status === 404) {
+          // Not a valid room link: ask the guest to scan the QR code (or pick a room in legacy mode)
+          setRoomNumber(null);
+          setRoomLink(null);
+          setIsValidating(false);
           return;
         }
+        if (!res.ok) return;
+        const state = await res.json();
+        if (!isMounted || !state?.success) return;
 
-        const res = await fetch("/api/settings/amenities");
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && data.amenities && isMounted) {
-            setAmenitiesStatus(prev => ({ ...prev, ...data.amenities }));
-            try {
-              localStorage.setItem("hues_stay_amenities", JSON.stringify(data.amenities));
-            } catch (e) {}
-          }
+        setRoomNumber(state.room);
+        rememberRoomLink(roomLink, state.room);
+        setIsValidating(false);
+
+        const deletedSet = new Set<string>(state.deletedItems || []);
+        setDeletedItems(state.deletedItems || []);
+        setWaitlistCounts(state.waitlistCounts || {});
+        setAmenitiesStatus({ ...DEFAULT_AMENITY_STATUS, ...(state.amenityStatus || {}) });
+
+        const limits: Record<string, number> = { ...DEFAULT_INVENTORY_LIMITS, ...(state.limits || {}) };
+        const invMap: Record<string, { inUse: number, limit: number }> = {};
+        const itemKeys = new Set([...TARGET_AUTO_UNAVAILABLE_ITEMS, ...Object.keys(limits)]);
+        for (const itemKey of itemKeys) {
+          if (deletedSet.has(itemKey)) continue;
+          invMap[itemKey] = { inUse: state.inUse?.[itemKey] || 0, limit: limits[itemKey] ?? 1 };
         }
-      } catch (err) {
-        console.warn("Amenities fetch note:", err);
-      }
-    };
-
-    fetchLiveInventory();
-    fetchLiveAmenities();
-    const interval = setInterval(() => {
-      fetchLiveInventory();
-      fetchLiveAmenities();
-    }, 2000);
-
-    const onFocus = () => {
-      fetchLiveInventory();
-      fetchLiveAmenities();
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        fetchLiveInventory();
-        fetchLiveAmenities();
-      }
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    const unsubscribeInventory = onSnapshot(collection(db, "inventory"), (invSnapshot) => {
-      const invMap: Record<string, { inUse: number, limit: number }> = {};
-      invSnapshot.forEach(docSnap => {
-        const data = docSnap.data();
-        const itemData = { inUse: data.inUse || 0, limit: data.limit || 1 };
-        invMap[data.name] = itemData;
-        if (data.name.toLowerCase().includes("glass")) {
-          invMap["Glasses (Set of 2)"] = itemData;
-          invMap["Glasses"] = itemData;
-        } else if (data.name.toLowerCase().includes("kettle") || data.name.toLowerCase().includes("teakettle")) {
-          invMap["Teakettle"] = itemData;
-          invMap["Kettle"] = itemData;
-        }
-      });
-      setInventory(prev => ({ ...prev, ...invMap }));
-      try {
-        localStorage.setItem("hues_stay_inventory", JSON.stringify(invMap));
-      } catch (e) {}
-    }, (error) => {
-      console.warn("Real-time inventory listener error:", error?.message || "offline");
-    });
-
-    const unsubscribeAmenities = onSnapshot(doc(db, "settings", "amenities"), (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data() as Record<string, 'available' | 'out_of_service'>;
-        setAmenitiesStatus(prev => ({ ...prev, ...data }));
+        setInventory(invMap);
         try {
-          localStorage.setItem("hues_stay_amenities", JSON.stringify(data));
+          localStorage.setItem("hues_stay_inventory", JSON.stringify(invMap));
+          localStorage.setItem("hues_stay_amenities", JSON.stringify(state.amenityStatus || {}));
+          localStorage.setItem("hues_stay_deleted_items", JSON.stringify(state.deletedItems || []));
         } catch (e) {}
+      } catch (err) {
+        console.warn("Live availability refresh:", err);
+        if (isMounted) setIsValidating(false);
       }
-    }, (error) => {
-      console.warn("Real-time amenities listener error:", error?.message || "offline");
-    });
+    };
+
+    refresh();
+    const interval = setInterval(refresh, 2000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      unsubscribeInventory();
-      unsubscribeAmenities();
     };
-  }, []);
+  }, [roomLink]);
 
   const checkIsItemOutOfService = (item: string): boolean => {
     if (!item) return false;
@@ -425,12 +218,6 @@ export default function GuestView() {
     }
 
     const lower = item.toLowerCase().trim();
-    if (lower.includes("glass")) {
-      if (amenitiesStatus["Glasses (Set of 2)"] === 'out_of_service' || amenitiesStatus["Glasses"] === 'out_of_service') return true;
-    }
-    if (lower.includes("kettle") || lower.includes("teakettle")) {
-      if (amenitiesStatus["Teakettle"] === 'out_of_service' || amenitiesStatus["Kettle"] === 'out_of_service') return true;
-    }
     for (const [key, val] of Object.entries(amenitiesStatus)) {
       if (val === 'out_of_service' && (key.toLowerCase().trim() === lower || lower.includes(key.toLowerCase().trim()))) {
         return true;
@@ -444,7 +231,7 @@ export default function GuestView() {
     setSelectedItems(prev => {
       const unavailableSelected = prev.filter(item => {
         const inv = getInventoryData(item);
-        const neededUnits = getItemUnitConsumption(item);
+        const neededUnits = 1;
         const availableUnits = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
         const isLimited = COMMON_ITEMS.find(i => i.name === item)?.isLimited ?? (inv !== undefined);
         const isOutOfStock = isLimited && inv && (availableUnits < neededUnits);
@@ -548,11 +335,17 @@ export default function GuestView() {
     }).length;
   }, [selectedItems]);
 
-  const handleManualRoomSelect = (num: string) => {
+  const handleManualRoomSelect = async (num: string) => {
     const trimmed = num.trim();
     if (!trimmed) return;
-    setRoomNumber(trimmed);
-    setIsValidating(false);
+    try {
+      const res = await fetch(`/api/guest?token=${encodeURIComponent(trimmed)}`);
+      if (res.ok) {
+        setRoomLink(trimmed);
+        return;
+      }
+    } catch (e) {}
+    toast.error("Please scan the QR code in your room to open this page.");
   };
 
   const handleProceedToGuestForm = async (e: React.FormEvent) => {
@@ -589,7 +382,7 @@ export default function GuestView() {
     // Verify stock for limited items using internal unit consumption before proceeding
     for (const item of limitedItemsRequested) {
       const inv = getInventoryData(item);
-      const neededUnits = getItemUnitConsumption(item);
+      const neededUnits = 1;
       if (inv) {
         const available = Math.max(0, inv.limit - inv.inUse);
         const isReturnable = isReturnableItem(item);
@@ -625,7 +418,7 @@ export default function GuestView() {
       const waitlistCandidate = finalItems.find(item => {
         if (!isReturnableItem(item)) return false;
         const inv = getInventoryData(item);
-        const neededUnits = getItemUnitConsumption(item);
+        const neededUnits = 1;
         const available = inv ? Math.max(0, inv.limit - inv.inUse) : 10;
         return inv && available < neededUnits;
       });
@@ -665,61 +458,26 @@ export default function GuestView() {
         sessionStorage.setItem("hues_last_req_id", reqId);
       } catch (e) {}
 
-      // 1. Direct Supabase write (cross-device real-time sync across mobile, laptop, preview)
-      const sb = getClientSupabase();
-      if (sb) {
-        sb.from("guest_requests").upsert({
-          id: reqId,
-          room_id: String(roomNumber),
-          items: finalItems,
-          custom_message: formattedMessage,
-          status: "pending",
-          created_at: requestData.createdAt,
-          is_waitlist: isWaitlist,
-          waitlist_for_item: waitlistForItem || null,
-          queue_position: queuePosition || null
-        }, { onConflict: "id" }).then(({ error }) => {
-          if (error) {
-            console.warn("[GUEST] Supabase write retry with base columns:", error.message);
-            sb.from("guest_requests").upsert({
-              id: reqId,
-              room_id: String(roomNumber),
-              items: finalItems,
-              custom_message: formattedMessage,
-              status: "pending",
-              created_at: requestData.createdAt
-            }, { onConflict: "id" }).then(() => {}, () => {});
-          }
-        });
-      }
-
-      // 2. Fire and sync Firestore write non-blockingly using canonical reqId as doc ID
-      const firestoreTask = (async () => {
-        try {
-          await setDoc(doc(db, "requests", reqId), requestData);
-        } catch (err: any) {
-          console.warn("Firestore sync background notification:", err?.message || "offline");
-        }
-      })();
-
-      // 3. Trigger server sync & email webhook non-blockingly (handles Supabase + Email dispatch in one shot)
-      fetch('/api/requests', {
+      // The server saves the request and emails the staff
+      const res = await fetch('/api/requests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestData)
-      }).catch(err => console.warn("Server API sync:", err));
-
-      // Limit waiting time to maximum 600ms so guest gets immediate feedback
-      await Promise.race([
-        firestoreTask,
-        new Promise(r => setTimeout(r, 600))
-      ]);
+        body: JSON.stringify({ ...requestData, roomToken: roomLink })
+      });
+      if (!res.ok) {
+        throw new Error(`Request was not saved (status ${res.status})`);
+      }
 
       setIsSuccess(true);
       toast.success(isWaitlist ? `Reserved! You are in line for ${waitlistForItem}.` : "Request sent to front desk!");
     } catch (error) {
       console.error("Error submitting request:", error);
-      setIsSuccess(true);
+      setLastSubmittedId(null);
+      setSubmittedWaitlistInfo(null);
+      try {
+        sessionStorage.removeItem("hues_last_req_id");
+      } catch (e) {}
+      toast.error(`Your request could not be sent. Please try again or call the supervisor on ${SUPERVISOR_PHONE}.`, { duration: 8000 });
     } finally {
       setIsSubmitting(false);
     }
@@ -733,8 +491,15 @@ export default function GuestView() {
     if (!window.confirm("Are you sure you want to cancel and remove this request?")) return;
     
     try {
-      await fetch(`/api/requests/${lastSubmittedId}`, { method: 'DELETE' });
-    } catch (e) {}
+      const res = await fetch(`/api/requests/${encodeURIComponent(lastSubmittedId)}`, {
+        method: 'DELETE',
+        headers: { 'x-room-token': roomLink || '' }
+      });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+    } catch (e) {
+      toast.error(`Could not cancel the request. Please call the supervisor on ${SUPERVISOR_PHONE}.`);
+      return;
+    }
 
     try {
       const cached = JSON.parse(localStorage.getItem("hues_stay_requests") || "[]");
@@ -871,11 +636,11 @@ export default function GuestView() {
                 <span className="text-[9.5px] sm:text-[10px] font-semibold uppercase tracking-wider truncate">Supervisor</span>
               </div>
               <div className="flex items-center justify-center gap-1 font-mono font-bold text-xs sm:text-sm text-[#2D2926]">
-                <a href="tel:8431995152" className="hover:underline">
+                <a href={`tel:${SUPERVISOR_PHONE}`} className="hover:underline">
                   8431995152
                 </a>
                 <a
-                  href="tel:8431995152"
+                  href={`tel:${SUPERVISOR_PHONE}`}
                   title="Call Supervisor"
                   aria-label="Call Supervisor"
                   className="p-1 text-[#A68966] hover:text-[#8E7455] transition-colors inline-flex items-center shrink-0"
